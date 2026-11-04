@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { PasswordResponses } from 'pdfjs-dist'
 import type { PDFDocumentLoadingTask } from 'pdfjs-dist'
 import { ChevronLeft, ChevronRight, Columns2, Rows2, Search, Spotlight, Square, X, PanelsTopLeft, MonitorUp, Trash2 } from 'lucide-react'
 import PdfPane from './PdfPane'
-import type { ColoredMatch, Navigation, TextSelection } from './PdfPane'
+import type { ColoredMatch, Navigation, PasswordPrompt, TextSelection } from './PdfPane'
 import { createPdfTask, indexPage } from './pdf'
 import type { DocumentSession } from './pdf'
 import { DocumentSearchIndex, nextMatchIndex, splitKeywords } from './search'
@@ -11,7 +12,7 @@ import './App.css'
 
 const palette = ['#e33c41', '#14856d', '#1975d2', '#c27700', '#bc438f', '#5b64bc', '#008b9b', '#765629']
 type Term = { id: string; value: string; color: string }
-type DocumentInfo = { id: string; name: string; bytes: Uint8Array }
+type DocumentInfo = { id: string; name: string; bytes: Uint8Array; password?: string }
 type SharedState = { terms: Term[]; dim: boolean; tolerant: boolean[] }
 type DocumentMetadata = { id: string; name: string; indexed: number; ready: boolean; texts: string[] }
 type RemoteDocument = { id: string; name: string; indexed: number; ready: boolean; search: DocumentSearchIndex }
@@ -24,10 +25,16 @@ function App() {
   const [remoteLeft, setRemoteLeft] = useState<RemoteDocument | null>(null)
   const remoteLeftRef = useRef(remoteLeft)
   const tasksRef = useRef<(PDFDocumentLoadingTask | null)[]>([null, null])
+  const passwordCallbacks = useRef<(((password: string | Error) => void) | null)[]>([null, null])
+  const passwordsRef = useRef<(string | undefined)[]>([undefined, undefined])
+  const passwordAttempts = useRef([0, 0])
+  const queuedPasswords = useRef<string[][]>([[], []])
+  const pendingFilesRef = useRef<(DocumentInfo | null)[]>([null, null])
   const readRequests = useRef(['', ''])
   const pendingFocus = useRef<FocusTarget[]>([])
   const viewsRef = useRef<(null | { documentId: string; page: number })[]>([null, null])
   const [errors, setErrors] = useState(['', '']), [loading, setLoading] = useState([false, false])
+  const [passwordPrompts, setPasswordPrompts] = useState<(PasswordPrompt | null)[]>([null, null])
   const [terms, setTerms] = useState<Term[]>([]), [input, setInput] = useState('')
   const [tolerant, setTolerant] = useState([false, false]), [dim, setDim] = useState(false)
   const previousTolerance = useRef(tolerant)
@@ -47,6 +54,7 @@ function App() {
 
   function searchResult(session: DocumentSession | RemoteDocument, term: Term, slot: number): SearchResult {
     const result = session.search.search(term.value, stateRef.current.tolerant[slot])
+    // 索引尚未完成时不能判定全文没有精确命中，避免过早回退到容错结果。
     return !session.ready && !stateRef.current.tolerant[slot] && result.mode === 'tolerant' ? { mode: 'exact', matches: [] } : result
   }
 
@@ -65,6 +73,7 @@ function App() {
       if (!termsRef.current.some(term => term.id === target.termId)) continue
       pendingFocus.current = pendingFocus.current.filter(value => value.slot !== target.slot || value.termId !== target.termId)
       const document = statsRef.current[target.slot]
+      // 跨窗口定位可能先于文档及索引到达；按文档 ID 暂存，等对应索引就绪后再应用。
       if (document?.id !== target.position.documentId || !document.ready) {
         pendingFocus.current.push(target)
         continue
@@ -161,12 +170,18 @@ function App() {
     setRemoteLeft(next)
   }
 
-  async function loadDocument(slot: number, name: string, bytes: Uint8Array, id = crypto.randomUUID()) {
+  async function loadDocument(slot: number, name: string, bytes: Uint8Array, id = crypto.randomUUID(), initialPassword?: string) {
     if (detached && slot === 0) return
+    // 异步加载或索引完成时用版本号排除已被新文件或取消操作替代的任务。
     const revision = ++revisions.current[slot]
     readRequests.current[slot] = id
     const previous = tasksRef.current[slot]
     tasksRef.current[slot] = null
+    passwordCallbacks.current[slot] = null
+    passwordsRef.current[slot] = initialPassword
+    queuedPasswords.current[slot] = []
+    pendingFilesRef.current[slot] = { id, name, bytes, password: initialPassword }
+    setPasswordPrompts(value => value.map((item, index) => index === slot ? null : item))
     let task: PDFDocumentLoadingTask | null = null
     documentsRef.current = documentsRef.current.map((item, index) => index === slot ? null : item)
     setDocuments(value => value.map((item, index) => index === slot ? null : item))
@@ -179,11 +194,30 @@ function App() {
       await previous?.destroy()
       if (revisions.current[slot] !== revision) return
       if (!name.toLowerCase().endsWith('.pdf')) throw new Error('仅支持 PDF 文件')
-      task = createPdfTask(bytes)
+      task = createPdfTask(bytes, initialPassword)
       tasksRef.current[slot] = task
+      passwordAttempts.current[slot] = 0
+      task.onPassword = (updatePassword: (password: string | Error) => void, reason: number) => {
+        if (revisions.current[slot] !== revision) return
+        if (queuedPasswords.current[slot].length > 0) {
+          const queued = queuedPasswords.current[slot].shift()!
+          passwordsRef.current[slot] = queued
+          updatePassword(queued)
+          return
+        }
+        const attempts = ++passwordAttempts.current[slot]
+        passwordCallbacks.current[slot] = updatePassword
+        const incorrect = reason === PasswordResponses.INCORRECT_PASSWORD
+        setLoading(value => value.map((item, index) => index === slot ? false : item))
+        setErrors(value => value.map((item, index) => index === slot ? '' : item))
+        setPasswordPrompts(value => value.map((item, index) => index === slot ? { id, name, incorrect, attempts } : item))
+      }
       const pdf = await task.promise
       if (revisions.current[slot] !== revision) { await pdf.loadingTask.destroy(); return }
-      const session: DocumentSession = { id, name, bytes, pdf, pages: [], indexed: 0, ready: false, search: new DocumentSearchIndex() }
+      passwordCallbacks.current[slot] = null
+      pendingFilesRef.current[slot] = null
+      setPasswordPrompts(value => value.map((item, index) => index === slot ? null : item))
+      const session: DocumentSession = { id, name, bytes, password: passwordsRef.current[slot], pdf, pages: [], indexed: 0, ready: false, search: new DocumentSearchIndex() }
       setDocuments(value => value.map((item, index) => index === slot ? session : item))
       for (let page = 1; page <= pdf.numPages; page++) {
         const indexedPage = await indexPage(pdf, page)
@@ -202,6 +236,9 @@ function App() {
         if (tasksRef.current[slot] === task) tasksRef.current[slot] = null
       }
       if (revisions.current[slot] === revision) {
+        passwordCallbacks.current[slot] = null
+        pendingFilesRef.current[slot] = null
+        setPasswordPrompts(value => value.map((item, index) => index === slot ? null : item))
         setErrors(value => value.map((item, index) => index === slot ? error instanceof Error ? error.message : String(error) : item))
         setDocuments(value => value.map((item, index) => index === slot ? null : item))
         if (slot === 0) channel.current?.postMessage({ type: 'left-index', left: null })
@@ -209,6 +246,40 @@ function App() {
     } finally {
       if (revisions.current[slot] === revision) setLoading(value => value.map((item, index) => index === slot ? false : item))
     }
+  }
+
+  function submitPassword(slot: number, password: string, notify = true) {
+    passwordsRef.current[slot] = password
+    if (pendingFilesRef.current[slot]) pendingFilesRef.current[slot] = { ...pendingFilesRef.current[slot]!, password }
+    if (slot === 1 && notify && readRequests.current[1]) channel.current?.postMessage({ type: 'password', id: readRequests.current[1], password })
+    const callback = passwordCallbacks.current[slot]
+    if (!callback) {
+      queuedPasswords.current[slot].push(password)
+      return
+    }
+    passwordCallbacks.current[slot] = null
+    setPasswordPrompts(value => value.map((item, index) => index === slot ? null : item))
+    setErrors(value => value.map((item, index) => index === slot ? '' : item))
+    setLoading(value => value.map((item, index) => index === slot ? true : item))
+    callback(password)
+  }
+
+  function cancelPassword(slot: number, notify = true) {
+    const id = readRequests.current[slot]
+    revisions.current[slot]++
+    readRequests.current[slot] = ''
+    passwordCallbacks.current[slot] = null
+    passwordsRef.current[slot] = undefined
+    queuedPasswords.current[slot] = []
+    pendingFilesRef.current[slot] = null
+    const currentTask = tasksRef.current[slot]
+    tasksRef.current[slot] = null
+    setPasswordPrompts(value => value.map((item, index) => index === slot ? null : item))
+    setLoading(value => value.map((item, index) => index === slot ? false : item))
+    setErrors(value => value.map((item, index) => index === slot ? '' : item))
+    if (slot === 0) channel.current?.postMessage({ type: 'left-index', left: null })
+    if (slot === 1 && notify && id) channel.current?.postMessage({ type: 'cancel-file', id })
+    void currentTask?.destroy().catch(() => {})
   }
 
   async function loadFile(slot: number, file: File) {
@@ -241,7 +312,7 @@ function App() {
       if (message.type === 'ready' && !detached) {
         setSeparated(true)
         const left = documentsRef.current[0], right = documentsRef.current[1]
-        const rightFile: DocumentInfo | null = right ? { id: right.id, name: right.name, bytes: right.bytes } : null
+        const rightFile: DocumentInfo | null = right ? { id: right.id, name: right.name, bytes: right.bytes, password: right.password } : pendingFilesRef.current[1]
         communication.postMessage({ type: 'state', state: stateRef.current, left: left ? metadata(left) : null, right: rightFile, targets: snapshotFocus() })
       } else if (message.type === 'state') {
         const state = message.state as SharedState
@@ -250,10 +321,12 @@ function App() {
         colorCounter.current = Math.max(colorCounter.current, state.terms.length)
         setDim(state.dim); setTolerant(state.tolerant)
         if ('left' in message) receiveLeft(message.left)
-        if (message.right) void loadDocument(1, message.right.name, new Uint8Array(message.right.bytes), message.right.id)
+        if (message.right) void loadDocument(1, message.right.name, new Uint8Array(message.right.bytes), message.right.id, message.right.password)
         if (message.targets) applyFocus(message.targets)
         else if (message.focus) locate(message.focus)
-      } else if (message.type === 'file') void loadDocument(1, message.file.name, new Uint8Array(message.file.bytes), message.file.id)
+      } else if (message.type === 'file') void loadDocument(1, message.file.name, new Uint8Array(message.file.bytes), message.file.id, message.file.password)
+      else if (message.type === 'password' && readRequests.current[1] === message.id) submitPassword(1, message.password, false)
+      else if (message.type === 'cancel-file' && readRequests.current[1] === message.id) cancelPassword(1, false)
       else if (message.type === 'left-index') receiveLeft(message.left)
       else if (message.type === 'view') viewsRef.current[message.slot] = message.view
       else if (message.type === 'closed' && !detached) setSeparated(false)
@@ -353,8 +426,10 @@ function App() {
       </section>)}</div><footer className="sidebar-footer">PDF.js · {import.meta.env.DEV ? '开发验证版' : '离线查看'}</footer>
     </aside>
     <div className={`panes ${vertical ? 'vertical' : ''} ${visibleSlots.length === 1 ? 'single' : ''}`}>
-      {visibleSlots.map(slot => <PdfPane key={slot} slot={slot} session={documents[slot]} error={errors[slot]} loading={loading[slot]} matches={colored[slot]} navigation={navigation[slot]} dim={dim} tolerant={tolerant[slot]} samples={samples}
-        onFile={file => void loadFile(slot, file)} onSample={name => void loadSample(slot, name)} onTerm={(value, selection) => addTerms([value], { slot, selection })}
+      {visibleSlots.map(slot => <PdfPane key={slot} slot={slot} session={documents[slot]} error={errors[slot]} loading={loading[slot]} passwordPrompt={passwordPrompts[slot]} matches={colored[slot]} navigation={navigation[slot]} dim={dim} tolerant={tolerant[slot]} samples={samples}
+        onFile={file => void loadFile(slot, file)} onSample={name => void loadSample(slot, name)}
+        onPasswordSubmit={password => submitPassword(slot, password)} onPasswordCancel={() => cancelPassword(slot)}
+        onTerm={(value, selection) => addTerms([value], { slot, selection })}
         onViewChange={(documentId, page) => { const view = { documentId, page }; viewsRef.current[slot] = view; channel.current?.postMessage({ type: 'view', slot, view }) }}
         onTolerant={value => { const next = tolerant.map((item, index) => index === slot ? value : item); setTolerant(next); broadcast({ ...stateRef.current, tolerant: next }) }} />)}
     </div></div>

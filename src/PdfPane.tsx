@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { TextLayer } from 'pdfjs-dist'
 import type { PDFPageProxy, RenderTask } from 'pdfjs-dist'
-import { ChevronLeft, ChevronRight, FilePlus2, Hand, MousePointer2, Scan, ZoomIn, ZoomOut } from 'lucide-react'
+import { ChevronLeft, ChevronRight, FilePlus2, Hand, Lock, MousePointer2, Scan, ZoomIn, ZoomOut } from 'lucide-react'
 import { indexPage } from './pdf'
 import type { DocumentSession, PageIndex } from './pdf'
 import { keywordAt } from './search'
@@ -10,6 +10,7 @@ import 'pdfjs-dist/web/pdf_viewer.css'
 
 export type ColoredMatch = Match & { term: string; color: string }
 export type Navigation = { id: string; documentId: string; term: string; match: Match; preservePosition?: boolean }
+export type PasswordPrompt = { id: string; name: string; incorrect: boolean; attempts: number }
 export type TextSelection = { page: number; start: number; length: number }
 type Rectangle = { left: number; top: number; width: number; height: number; term: string; color: string; start: number; length: number }
 const maxScale = 32
@@ -38,6 +39,7 @@ function preparePage(session: DocumentSession, pageNumber: number, onPreview?: (
     if (cancelled) throw new Error('Page preparation cancelled')
     const fontHeights = content.items.flatMap(item => 'str' in item && item.str.trim() ? [Math.hypot(item.transform[2], item.transform[3])] : []).filter(height => height > 0)
     const smallestFont = fontHeights.reduce((smallest, height) => Math.min(smallest, height), 16)
+    // 先放大文字层再整体缩回页面尺寸，降低极小文字布局的精度损失。
     const textScale = Math.min(64, 2 ** Math.max(0, Math.ceil(Math.log2(16 / smallestFont))))
     stagingLayer.style.setProperty('--scale-factor', String(textScale))
     stagingLayer.style.setProperty('--total-scale-factor', String(textScale))
@@ -61,6 +63,7 @@ function preparePage(session: DocumentSession, pageNumber: number, onPreview?: (
     stagingLayer.style.height = `${viewport.height * textScale}px`
     const index = session.pages[pageNumber - 1] ?? await indexPage(session.pdf, pageNumber)
     if (cancelled) throw new Error('Page preparation cancelled')
+    // 命中偏移依赖索引段与文字层逐项对应；不一致时禁用文字层，避免错误高亮和取词。
     const aligned = index.segments.length === textLayer.textDivs.length && !index.segments.some((segment, position) => segment.text !== textLayer!.textContentItemsStr[position])
     const error = aligned ? '' : '文字索引与文字层不一致，本页仅查看，已停止高亮以避免错位'
     if (!aligned) stagingLayer.replaceChildren()
@@ -73,8 +76,10 @@ function preparePage(session: DocumentSession, pageNumber: number, onPreview?: (
 
 type Props = {
   slot: number; session: DocumentSession | null; error: string; loading: boolean
+  passwordPrompt?: PasswordPrompt | null
   matches: ColoredMatch[]; navigation: Navigation | null; dim: boolean; tolerant: boolean; samples: string[]
   onFile: (file: File) => void; onSample: (name: string) => void
+  onPasswordSubmit?: (password: string) => void; onPasswordCancel?: () => void
   onTerm: (term: string, selection: TextSelection) => void; onTolerant: (value: boolean) => void
   onViewChange?: (documentId: string, page: number) => void
 }
@@ -85,6 +90,7 @@ export default function PdfPane(props: Props) {
   const [scale, setScale] = useState(1)
   const [rectangles, setRectangles] = useState<Rectangle[]>([])
   const [rendered, setRendered] = useState<PreparedPage | null>(null)
+  const [password, setPassword] = useState('')
   const pageCache = useRef(new Map<string, PreparedPage>())
   const backgroundJobs = useRef(new Set<ReturnType<typeof preparePage>>())
   const committedPage = useRef<PreparedPage | null>(null)
@@ -103,6 +109,7 @@ export default function PdfPane(props: Props) {
   const detailRef = useRef<HTMLCanvasElement>(null)
   const layerRef = useRef<HTMLDivElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
+  const passwordRef = useRef<HTMLInputElement>(null)
   const lastNavigation = useRef('')
   const pointerStart = useRef<{ x: number; y: number } | null>(null)
   const committedKey = useRef('')
@@ -137,6 +144,11 @@ export default function PdfPane(props: Props) {
   useEffect(() => {
     if (session) props.onViewChange?.(session.id, pageNumber)
   }, [session?.id, pageNumber])
+
+  useEffect(() => {
+    setPassword('')
+    if (props.passwordPrompt) passwordRef.current?.focus()
+  }, [props.passwordPrompt?.id, props.passwordPrompt?.attempts])
 
   const renderKey = `${session?.id}:${pageNumber}`
   activeKey.current = renderKey
@@ -246,6 +258,7 @@ export default function PdfPane(props: Props) {
     const paddingLeft = Number.parseFloat(getComputedStyle(scroll).paddingLeft)
     const paddingTop = Number.parseFloat(getComputedStyle(scroll).paddingTop)
     const anchor = zoomAnchor.current
+    // 锚点使用未缩放的页面坐标；缩放后恢复滚动位置，使鼠标下的内容（或视图中心）不跳动。
     const centerX = anchor?.x ?? (scroll.scrollLeft + scroll.clientWidth / 2 - paddingLeft) / displayedScale.current
     const centerY = anchor?.y ?? (scroll.scrollTop + scroll.clientHeight / 2 - paddingTop) / displayedScale.current
     paper.style.width = `${rendered.width * scale}px`; paper.style.height = `${rendered.height * scale}px`
@@ -354,6 +367,7 @@ export default function PdfPane(props: Props) {
       setDetailBusy(false)
       return
     }
+    // 精绘只覆盖可见区域及少量余量，并限制像素数，避免高倍率时渲染整页耗尽内存。
     const paddingX = Math.ceil(scroll.clientWidth * 0.15), paddingY = Math.ceil(scroll.clientHeight * 0.15)
     const left = Math.max(0, Math.floor(visibleLeft - paddingX))
     const top = Math.max(0, Math.floor(visibleTop - paddingY))
@@ -423,6 +437,7 @@ export default function PdfPane(props: Props) {
     const caret = document.caretPositionFromPoint?.(event.clientX, event.clientY)
     let localOffset: number | null = caret?.offsetNode === node ? caret.offset : null
     if (localOffset === null) {
+      // 浏览器无法给出当前文字节点的光标位置时，按字符矩形命中；距离不唯一则不猜测。
       const candidates: { offset: number; distance: number }[] = []
       for (let offset = 0; offset < segment.text.length; offset++) {
         const range = document.createRange()
@@ -456,7 +471,7 @@ export default function PdfPane(props: Props) {
     onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragging(false) }}
     onDrop={event => { event.preventDefault(); setDragging(false); const file = event.dataTransfer.files[0]; if (file) props.onFile(file) }}>
     <header className="pane-header"><span className="slot-label">{slot === 0 ? 'A' : 'B'}</span>
-      <strong title={session?.name}>{session?.name ?? (slot === 0 ? '原理图' : '位号 / 丝印 / 走线图')}</strong>
+      <strong title={session?.name ?? props.passwordPrompt?.name}>{session?.name ?? props.passwordPrompt?.name ?? (slot === 0 ? '原理图' : '位号 / 丝印 / 走线图')}</strong>
       <button title="打开 PDF" onClick={() => fileRef.current?.click()}><FilePlus2 size={17} /><span>打开 PDF</span></button>
       <input ref={fileRef} type="file" accept="application/pdf,.pdf" hidden onChange={event => {
         const file = event.target.files?.[0]; if (file) props.onFile(file); event.target.value = ''
@@ -505,7 +520,23 @@ export default function PdfPane(props: Props) {
       onPointerCancel={() => { panStart.current = null; setPanning(false) }}
       onLostPointerCapture={() => { panStart.current = null; setPanning(false) }}
       onAuxClick={event => { if (event.button === 1) event.preventDefault() }}>
-      {!session ? <div className="empty-pane"><FilePlus2 size={40} /><h2>{props.loading ? '正在打开 PDF' : '尚未打开 PDF'}</h2></div> :
+      {!session ? (props.passwordPrompt ? <div className="empty-pane">
+        <form className="password-card" autoComplete="off" onSubmit={event => {
+          event.preventDefault()
+          if (password) props.onPasswordSubmit?.(password)
+        }}>
+          <Lock size={34} />
+          <h2>PDF 受密码保护</h2>
+          <p className="password-file" title={props.passwordPrompt.name}>{props.passwordPrompt.name}</p>
+          {props.passwordPrompt.incorrect && <div role="alert" className="error">密码错误，请重新输入</div>}
+          <input ref={passwordRef} type="password" aria-label={`文档 ${slot === 0 ? 'A' : 'B'} 密码`}
+            placeholder="请输入打开密码" autoComplete="off" value={password} onChange={event => setPassword(event.target.value)} autoFocus />
+          <div className="password-actions">
+            <button type="button" onClick={() => props.onPasswordCancel?.()}>取消</button>
+            <button type="submit" className="search-command" disabled={!password}>解锁打开</button>
+          </div>
+        </form>
+      </div> : <div className="empty-pane"><FilePlus2 size={40} /><h2>{props.loading ? '正在打开 PDF' : '尚未打开 PDF'}</h2></div>) :
         <div className="paper" ref={paperRef} data-page={pageNumber}>
           <div className="page-content" ref={contentRef}>
             <canvas ref={canvasRef} className="base-canvas" />
@@ -521,8 +552,8 @@ export default function PdfPane(props: Props) {
             data-start={rect.start} data-length={rect.length} className={`hit-rectangle ${navigation?.match.page === pageNumber && navigation?.match.start === rect.start && navigation?.match.length === rect.length && navigation?.term === rect.term ? 'current-hit' : ''}`} style={{ left: rect.left, top: rect.top, width: rect.width, height: rect.height, borderColor: rect.color, background: `${rect.color}30` }} />)}</div>
         </div>}
     </div>
-    <footer className="pane-status"><span className={busy || detailBusy || props.loading || (session && !session.ready) ? 'status-dot working' : 'status-dot'} />
-      <span>{busy ? '渲染中' : detailBusy ? '精绘中' : session ? session.ready ? session.pages.some(page => page.text.trim()) ? `文字索引完成 · ${session.pdf.numPages} 页` : '无可提取文字 · 仅查看' : `索引中 ${session.indexed}/${session.pdf.numPages}` : '未加载'}</span>
+    <footer className="pane-status"><span className={busy || detailBusy || props.loading || props.passwordPrompt || (session && !session.ready) ? 'status-dot working' : 'status-dot'} />
+      <span>{busy ? '渲染中' : detailBusy ? '精绘中' : props.passwordPrompt ? '等待输入密码' : session ? session.ready ? session.pages.some(page => page.text.trim()) ? `文字索引完成 · ${session.pdf.numPages} 页` : '无可提取文字 · 仅查看' : `索引中 ${session.indexed}/${session.pdf.numPages}` : '未加载'}</span>
       <span>{session?.ready ? `${matches.length} 处命中` : ''}</span>
     </footer>
   </section>

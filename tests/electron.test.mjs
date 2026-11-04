@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { _electron } from 'playwright-core'
 import { PDFDocument, StandardFonts } from 'pdf-lib'
+import { encryptedPdf } from './encrypted-fixture.mjs'
 
 test('desktop loads PDFs offline and links native windows from a portable path', { timeout: 180000 }, async () => {
   const pdf = await PDFDocument.create()
@@ -59,6 +60,32 @@ test('desktop loads PDFs offline and links native windows from a portable path',
     await closed
     await main.locator('[data-slot="1"] .current-hit').waitFor()
     assert.equal(await main.locator('.pdf-pane').count(), 2)
+    const encrypted = await encryptedPdf('1.7ext3')
+    await main.locator('[data-slot="0"] input[type=file]').setInputFiles({ name: 'AES256 locked A.pdf', mimeType: 'application/pdf', buffer: encrypted })
+    await main.getByLabel('文档 A 密码', { exact: true }).fill('wrong')
+    await main.locator('[data-slot="0"]').getByRole('button', { name: '解锁打开', exact: true }).click()
+    await main.getByRole('alert').filter({ hasText: '密码错误，请重新输入' }).waitFor()
+    await main.getByLabel('文档 A 密码', { exact: true }).fill('1234')
+    await main.locator('[data-slot="0"]').getByRole('button', { name: '解锁打开', exact: true }).click()
+    await main.locator('[data-slot="0"] .pane-status').filter({ hasText: /文字索引完成/ }).waitFor({ timeout: 30000 })
+    await main.locator('[data-slot="1"] input[type=file]').setInputFiles({ name: 'AES256 locked B.pdf', mimeType: 'application/pdf', buffer: encrypted })
+    await main.getByLabel('文档 B 密码', { exact: true }).waitFor()
+    await main.locator('[data-slot="1"]').getByRole('button', { name: '取消', exact: true }).click()
+    assert.equal(await main.locator('[data-slot="1"] .pane-status').textContent(), '未加载')
+    await main.locator('[data-slot="1"] input[type=file]').setInputFiles({ name: 'AES256 locked B.pdf', mimeType: 'application/pdf', buffer: encrypted })
+    await main.getByLabel('文档 B 密码', { exact: true }).fill('5678')
+    await main.locator('[data-slot="1"]').getByRole('button', { name: '解锁打开', exact: true }).click()
+    await main.locator('[data-slot="1"] .pane-status').filter({ hasText: /文字索引完成/ }).waitFor({ timeout: 30000 })
+    const encryptedWindow = app.waitForEvent('window')
+    await main.getByRole('button', { name: '双屏窗口', exact: true }).click()
+    const unlockedSecondary = await encryptedWindow
+    unlockedSecondary.on('pageerror', error => errors.push(error.message))
+    await unlockedSecondary.locator('[data-slot="1"] .pane-status').filter({ hasText: /文字索引完成/ }).waitFor({ timeout: 30000 })
+    assert.equal(await unlockedSecondary.getByLabel('文档 B 密码', { exact: true }).count(), 0)
+    const encryptedClosed = unlockedSecondary.waitForEvent('close')
+    await main.getByRole('button', { name: '恢复双栏', exact: true }).click()
+    await encryptedClosed
+    await main.locator('[data-slot="1"] .current-hit').waitFor()
     assert.equal(await main.evaluate(() => window.open('https://example.com') === null), true)
     assert.equal(await main.evaluate(() => fetch('app://viewer/%2e%2e%2fpackage.json').then(response => response.status)), 403)
     assert.deepEqual(requests, [])
@@ -66,7 +93,7 @@ test('desktop loads PDFs offline and links native windows from a portable path',
     assert.deepEqual(errors, [])
     mkdirSync('artifacts', { recursive: true })
     await main.screenshot({ path: 'artifacts/electron-desktop.png' })
-    console.log(JSON.stringify({ packaged: !!executablePath, portablePath: !!temporary, nativeWindows: true, externalRequests: requests.length }))
+    console.log(JSON.stringify({ packaged: !!executablePath, portablePath: !!temporary, nativeWindows: true, aes256Password: true, retryAndCancel: true, externalRequests: requests.length }))
   } finally {
     await app?.close()
     rmSync(temporary, { recursive: true, force: true })

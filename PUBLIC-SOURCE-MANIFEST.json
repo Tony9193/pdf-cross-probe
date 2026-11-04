@@ -1,5 +1,5 @@
 {
-  "version": "0.1.1",
+  "version": "0.1.2",
   "files": [
     {
       "file": ".gitignore",
@@ -15,7 +15,7 @@
     },
     {
       "file": "README.md",
-      "sha256": "97f807338a0b6ef7848c9b966ce78af6b401505b9fdb7209cb431a4608a710bc"
+      "sha256": "99f8d3ea7847617f3b319ab37c7b29673b74f4aa7bbb9148c8f0b9ac51877abf"
     },
     {
       "file": "electron/main.cjs",
@@ -27,15 +27,15 @@
     },
     {
       "file": "package-lock.json",
-      "sha256": "13c17e59605ee067c2db58e3eb481852fe54bbd56bd7ee14fdc7f945f7f5f604"
+      "sha256": "b144f7ef8347f672f405ca91e8282c54bacfb634c0176402e74e96872f835145"
     },
     {
       "file": "package.json",
-      "sha256": "2dfa9c17d37866f07c6137a01402440eaa2f8fbda61dbfea0f0b8383fb69f27e"
+      "sha256": "b21b9648fa9f9896d97155bcb676b7957144754cb4f61037a7c5106ecb5ab325"
     },
     {
       "file": "portable/README.txt",
-      "sha256": "2e69e1ca7a1db7feeeb96af3873b4a133075b15e4f3df215070a71ab041df1f1"
+      "sha256": "d21af47d0b3c4f310a8351bcf06696d9efe2dbda10f5610fc1c8070df607bea1"
     },
     {
       "file": "portable/Start.cmd",
@@ -63,15 +63,15 @@
     },
     {
       "file": "src/App.css",
-      "sha256": "ce3010a7f6f762a8b0892565fe7068ab32bb64450da01773b3d8a2e20e30b38d"
+      "sha256": "ad23543af5a817f8125888c6942fdbeaf3bfd59c6d4125a6c41ac83dd47661b6"
     },
     {
       "file": "src/App.tsx",
-      "sha256": "962375559e55798a80b4519f2efd88a74852d0cd3a15d6f1ebdf961b86a3677b"
+      "sha256": "408b1561e5922266b547ebad505724c9af946e5659e6485e1ec6990d14259825"
     },
     {
       "file": "src/PdfPane.tsx",
-      "sha256": "219b2bf07bdb7b7ed904b485b65c4f4be4327fa07077be1f94ee18fa6eb5bc32"
+      "sha256": "2e1e223ba7f1d695661bbeaa25a917898cee24ab937eea0fc8cabb801f3b2731"
     },
     {
       "file": "src/index.css",
@@ -83,15 +83,19 @@
     },
     {
       "file": "src/pdf.ts",
-      "sha256": "538383a1a0b0bf05d24c236b3edbe607857b84500a0eca0aae2e708e7ce38688"
+      "sha256": "36294baca9e680e65b8bfa75cfd8ef941fb317a6caf1abd6f6a9daa598762bc0"
     },
     {
       "file": "src/search.ts",
-      "sha256": "a0b1fe1393bdbb537be8740fff8b18708be459f3eee790a5e579e19809fd39e3"
+      "sha256": "ebe468331a456de90fb4027bf5243116a5433802e3e715caa8dd3bc288750f55"
     },
     {
       "file": "tests/electron.test.mjs",
-      "sha256": "f191cc0864efe4000d2d8cd17344d22b8ec2d16cbb811d6e73c55977fba9c2d2"
+      "sha256": "03e8fed299bbd3aa9856778ab42c70e0fed1cd77cddcb799ed0b7c01498b78b0"
+    },
+    {
+      "file": "tests/encrypted-fixture.mjs",
+      "sha256": "011ffceb62884a14d76bf5b30d626d35d75297063d81ec3c5e9c3b96f16f5033"
     },
     {
       "file": "tests/public-source.test.mjs",
@@ -103,7 +107,7 @@
     },
     {
       "file": "tests/viewer.test.mjs",
-      "sha256": "b15398ac4f28a4341a9b499ce0400423abad33b643364119fdfb05b916c0aa86"
+      "sha256": "7c8bce9e83b8d2b4c34e4a26e75977ecca5ab159b8752501b3d205a1497a7007"
     },
     {
       "file": "tsconfig.app.json",

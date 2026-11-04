@@ -11,6 +11,7 @@ export type DocumentSession = {
   id: string
   name: string
   bytes: Uint8Array
+  password?: string
   pdf: PDFDocumentProxy
   pages: PageIndex[]
   indexed: number
@@ -18,10 +19,11 @@ export type DocumentSession = {
   search: DocumentSearchIndex
 }
 
-export function createPdfTask(bytes: Uint8Array) {
+export function createPdfTask(bytes: Uint8Array, password?: string) {
   if (!new TextDecoder().decode(bytes.subarray(0, 1024)).includes('%PDF-')) throw new Error('文件不是有效的 PDF')
   return getDocument({
     data: bytes.slice(),
+    password,
     cMapUrl: `${import.meta.env.BASE_URL}pdf-assets/cmaps/`,
     cMapPacked: true,
     standardFontDataUrl: `${import.meta.env.BASE_URL}pdf-assets/standard_fonts/`,
@@ -29,12 +31,13 @@ export function createPdfTask(bytes: Uint8Array) {
   })
 }
 
-export async function openPdf(bytes: Uint8Array) {
-  return createPdfTask(bytes).promise
+export async function openPdf(bytes: Uint8Array, password?: string) {
+  return createPdfTask(bytes, password).promise
 }
 
 export async function indexPage(pdf: PDFDocumentProxy, pageNumber: number): Promise<PageIndex> {
   const page = await pdf.getPage(pageNumber)
+  // 保留 PDF 原始文本，让搜索索引自行归一化并映射回文本位置。
   const content = await page.getTextContent({ disableNormalization: true })
   let text = ''
   const segments: Segment[] = []
@@ -46,10 +49,12 @@ export async function indexPage(pdf: PDFDocumentProxy, pageNumber: number): Prom
     if (previous && item.str) {
       const deltaX = item.transform[4] - previous.endX
       const deltaY = item.transform[5] - previous.endY
+      // 按当前文字方向分解间距，使旋转文本也能判断片段是否相邻。
       const along = deltaX * Math.cos(angle) + deltaY * Math.sin(angle)
       const across = Math.abs(-deltaX * Math.sin(angle) + deltaY * Math.cos(angle))
       const adjacent = !previous.hasEOL && angleDistance(angle, previous.angle) < 0.05 &&
         across < height * 0.3 && along >= -height * 0.2 && along < height * 0.3
+      // 非相邻片段插入分隔符，避免跨行或远距离文本被拼成一个搜索词。
       if (!adjacent && text && !/\s$/.test(text)) text += '\n'
     }
     segments.push({ start: text.length, text: item.str })

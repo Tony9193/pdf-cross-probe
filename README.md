@@ -4,7 +4,7 @@ A local PDF.js viewer for linked schematic and reference-designator searches. PD
 
 ## Run
 
-For Windows users, extract `release/0.1.1/PDF-Cross-Probe-0.1.1-win-x64.zip`, or copy the complete `release/0.1.1/win-unpacked` directory. Double-click `PDF Cross Probe.exe` or `Start.cmd`. The EXE needs its companion files; do not copy it alone. Python, Node.js, WebView2, a local server and an internet connection are not required. This unsigned build may require approval under Windows or company security policy; do not disable security software. Chinese usage instructions are included in `README.txt`. Versioned output keeps an already-running older release untouched.
+For Windows users, extract `release/0.1.2/PDF-Cross-Probe-0.1.2-win-x64.zip`, or copy the complete `release/0.1.2/win-unpacked` directory. Double-click `PDF Cross Probe.exe` or `Start.cmd`. The EXE needs its companion files; do not copy it alone. Python, Node.js, WebView2, a local server and an internet connection are not required. This unsigned build may require approval under Windows or company security policy; do not disable security software. Chinese usage instructions are included in `README.txt`. Versioned output keeps an already-running older release untouched.
 
 Development requires Node.js and npm:
 
@@ -19,7 +19,8 @@ The desktop app serves bundled assets through a restricted `app://viewer` protoc
 
 ## Controls
 
-- Open or drop a PDF in each pane.
+- Open or drop a PDF in each pane. Password-protected PDFs prompt for a password in that pane, support retry on wrong password or cancellation, and keep the unlocked state across linked dual-window mode.
+- Standard RC4, AES-128 and AES-256 encrypted PDFs are covered by tests. Supply a known opening or owner password; this is not a password-recovery tool. Passwords are used only in current-session memory and local window messages, not written to application storage, URLs or logs.
 - Enter one keyword per line and use the search command to append highlights. The last submitted word becomes active; other words retain highlights but display an unlocated status until selected.
 - Clicking diagram text adds the complete word, preserves the clicked location in that pane, and locates its first match in the other document. Adjacent text fragments share one complete highlight outline.
 - Click a keyword to locate its first match in each document.

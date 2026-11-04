@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { after, afterEach, before, beforeEach, test } from 'node:test'
 import { mkdirSync } from 'node:fs'
 import { createServer } from 'vite'
 import { chromium } from 'playwright-core'
-import { degrees, PDFDocument, StandardFonts } from 'pdf-lib'
+import { degrees, PDFDocument, PDFHexString, StandardFonts } from 'pdf-lib'
+import { encryptedPdf } from './encrypted-fixture.mjs'
 
 let server, browser, context, page, url
 let fixture, replacement
@@ -24,6 +26,50 @@ async function makePdf(ground = true) {
   const second = pdf.addPage([640, 800])
   second.drawText(ground ? 'GND' : 'CHANGE_A', { x: 200, y: 400, size: 14, font })
   return Buffer.from(await pdf.save())
+}
+
+function rc4(key, input) {
+  const state = Uint8Array.from({ length: 256 }, (_, index) => index)
+  let j = 0
+  for (let i = 0; i < 256; i++) {
+    j = (j + state[i] + key[i % key.length]) & 0xff
+    ;[state[i], state[j]] = [state[j], state[i]]
+  }
+  const output = new Uint8Array(input.length)
+  let a = 0, b = 0
+  for (let i = 0; i < input.length; i++) {
+    a = (a + 1) & 0xff
+    b = (b + state[a]) & 0xff
+    ;[state[a], state[b]] = [state[b], state[a]]
+    output[i] = input[i] ^ state[(state[a] + state[b]) & 0xff]
+  }
+  return Buffer.from(output)
+}
+
+async function makeEncryptedPdf(userCode = '1234', ownerCode = '5678') {
+  const loaded = await PDFDocument.load(await makePdf(), { updateMetadata: false })
+  const padding = Buffer.from('28bf4e5e4e758a4164004e56fffa01082e2e00b6d0683e802f0ca9fe6453697a', 'hex')
+  const pad = value => Buffer.concat([Buffer.from(value, 'latin1'), padding]).subarray(0, 32)
+  const fileId = Buffer.alloc(16, 7)
+  const ownerKey = createHash('md5').update(pad(ownerCode)).digest().subarray(0, 5)
+  const O = rc4(ownerKey, pad(userCode))
+  const flags = Buffer.from([0xfc, 0xff, 0xff, 0xff])
+  const encryptionKey = createHash('md5').update(Buffer.concat([pad(userCode), O, flags, fileId])).digest().subarray(0, 5)
+  const U = rc4(encryptionKey, padding)
+  for (const [ref, object] of loaded.context.enumerateIndirectObjects()) {
+    if (object.contents instanceof Uint8Array) {
+      const suffix = Buffer.from([ref.objectNumber & 0xff, (ref.objectNumber >> 8) & 0xff, (ref.objectNumber >> 16) & 0xff, ref.generationNumber & 0xff, (ref.generationNumber >> 8) & 0xff])
+      const streamKey = createHash('md5').update(Buffer.concat([encryptionKey, suffix])).digest().subarray(0, 10)
+      object.contents = rc4(streamKey, object.contents)
+    }
+  }
+  delete loaded.context.trailerInfo.Info
+  loaded.context.trailerInfo.ID = loaded.context.obj([PDFHexString.of(fileId.toString('hex')), PDFHexString.of(fileId.toString('hex'))])
+  loaded.context.trailerInfo.Encrypt = loaded.context.register(loaded.context.obj({
+    Filter: 'Standard', V: 1, R: 2, Length: 40, P: -4,
+    O: PDFHexString.of(O.toString('hex')), U: PDFHexString.of(U.toString('hex')),
+  }))
+  return Buffer.from(await loaded.save({ useObjectStreams: false }))
 }
 
 async function upload(target, slot, buffer = fixture, name = `drawing ${slot}.pdf`) {
@@ -436,4 +482,95 @@ test('high zoom remains bounded, cursor anchored and draggable on desktop and mo
   await page.setViewportSize({ width: 390, height: 844 })
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 390)
   await page.screenshot({ path: 'artifacts/viewer-mobile.png' })
+})
+
+test('password-protected PDFs support retry, cancellation, unlock, and dual-window sync', { timeout: 60000 }, async () => {
+  const encrypted = await makeEncryptedPdf('1234', '5678')
+  await page.locator('[data-slot="0"] input[type=file]').setInputFiles({ name: 'encrypted-A.pdf', mimeType: 'application/pdf', buffer: encrypted })
+  await page.locator('[data-slot="0"] .pane-status').filter({ hasText: '等待输入密码' }).waitFor()
+  const inputA = page.getByLabel('文档 A 密码', { exact: true })
+  await inputA.fill('wrong')
+  await page.locator('[data-slot="0"]').getByRole('button', { name: '解锁打开', exact: true }).click()
+  await page.locator('[data-slot="0"]').getByRole('alert').filter({ hasText: '密码错误，请重新输入' }).waitFor()
+  assert.equal(await inputA.inputValue(), '')
+  await inputA.fill('1234')
+  await page.locator('[data-slot="0"]').getByRole('button', { name: '解锁打开', exact: true }).click()
+  await page.locator('[data-slot="0"] .pane-status').filter({ hasText: /文字索引完成/ }).waitFor({ timeout: 30000 })
+
+  await page.locator('[data-slot="1"] input[type=file]').setInputFiles({ name: 'encrypted-B.pdf', mimeType: 'application/pdf', buffer: encrypted })
+  await page.locator('[data-slot="1"] .pane-status').filter({ hasText: '等待输入密码' }).waitFor()
+  await page.locator('[data-slot="1"]').getByRole('button', { name: '取消', exact: true }).click()
+  assert.equal(await page.locator('[data-slot="1"] .pane-status').textContent(), '未加载')
+  await page.waitForFunction(() => window.workerCounts.created - window.workerCounts.terminated === 1)
+
+  await page.locator('[data-slot="1"] input[type=file]').setInputFiles({ name: 'encrypted-B.pdf', mimeType: 'application/pdf', buffer: encrypted })
+  await page.getByLabel('文档 B 密码', { exact: true }).fill('5678')
+  await page.locator('[data-slot="1"]').getByRole('button', { name: '解锁打开', exact: true }).click()
+  await page.locator('[data-slot="1"] .pane-status').filter({ hasText: /文字索引完成/ }).waitFor({ timeout: 30000 })
+
+  await addTerm(page, 'R3501')
+  assert.equal(await page.locator('[data-position="0:R3501"]').textContent(), '1 / 1')
+  assert.equal(await page.locator('[data-position="1:R3501"]').textContent(), '1 / 1')
+
+  const popup = page.waitForEvent('popup')
+  await page.getByRole('button', { name: '双屏窗口', exact: true }).click()
+  const secondary = await popup
+  await secondary.locator('[data-slot="1"] .pane-status').filter({ hasText: /文字索引完成/ }).waitFor({ timeout: 30000 })
+  assert.equal(await secondary.locator('[data-position="1:R3501"]').textContent(), '1 / 1')
+  await secondary.close()
+})
+
+for (const [algorithm, version] of [['AES-128', '1.6'], ['AES-256', '1.7ext3']]) {
+  test(`${algorithm} password PDFs unlock and synchronize while the second window is waiting`, { timeout: 60000 }, async () => {
+    const encrypted = await encryptedPdf(version)
+    await page.locator('[data-slot="0"] input[type=file]').setInputFiles({ name: `${algorithm}-A.pdf`, mimeType: 'application/pdf', buffer: encrypted })
+    await page.getByLabel('文档 A 密码', { exact: true }).fill('5678')
+    await page.locator('[data-slot="0"]').getByRole('button', { name: '解锁打开', exact: true }).click()
+    await page.locator('[data-slot="0"] .pane-status').filter({ hasText: /文字索引完成/ }).waitFor({ timeout: 30000 })
+    await page.locator('[data-slot="1"] input[type=file]').setInputFiles({ name: `${algorithm}-B.pdf`, mimeType: 'application/pdf', buffer: encrypted })
+    await page.getByLabel('文档 B 密码', { exact: true }).waitFor()
+    const popup = page.waitForEvent('popup')
+    await page.getByRole('button', { name: '双屏窗口', exact: true }).click()
+    const secondary = await popup
+    await secondary.getByLabel('文档 B 密码', { exact: true }).fill('wrong')
+    await secondary.getByRole('button', { name: '解锁打开', exact: true }).click()
+    await secondary.getByRole('alert').filter({ hasText: '密码错误，请重新输入' }).waitFor()
+    await secondary.getByLabel('文档 B 密码', { exact: true }).fill('1234')
+    await secondary.getByRole('button', { name: '解锁打开', exact: true }).click()
+    await secondary.locator('[data-slot="1"] .pane-status').filter({ hasText: /文字索引完成/ }).waitFor({ timeout: 30000 })
+    await addTerm(secondary, 'GND')
+    await page.waitForFunction(() => document.querySelector('[data-position="1:GND"]')?.textContent === '1 / 2')
+    await secondary.getByTitle('GND · 文档 B · 下一处', { exact: true }).click()
+    await page.waitForFunction(() => document.querySelector('[data-position="1:GND"]')?.textContent === '2 / 2')
+    assert.equal(await page.evaluate(() => JSON.stringify({ ...localStorage }).includes('1234') || JSON.stringify({ ...sessionStorage }).includes('1234')), false)
+    await secondary.close()
+    await page.locator('[data-slot="1"] .paper').waitFor()
+    assert.equal(await page.getByLabel('文档 B 密码', { exact: true }).count(), 0)
+  })
+}
+
+test('stale password cancellation cannot destroy a replacement PDF', { timeout: 60000 }, async () => {
+  await page.evaluate(() => {
+    const original = BroadcastChannel.prototype.postMessage
+    BroadcastChannel.prototype.postMessage = function (message) {
+      if (message.type === 'file') window.lastFileId = message.file.id
+      return original.call(this, message)
+    }
+  })
+  const encrypted = await encryptedPdf()
+  await page.locator('[data-slot="1"] input[type=file]').setInputFiles({ name: 'locked-old.pdf', mimeType: 'application/pdf', buffer: encrypted })
+  await page.getByLabel('文档 B 密码', { exact: true }).waitFor()
+  const old = await page.evaluate(() => window.lastFileId)
+  await upload(page, 1, fixture, 'replacement.pdf')
+  await page.evaluate(async id => {
+    const channel = new BroadcastChannel(`pdf-probe:${new URLSearchParams(location.search).get('session')}`)
+    channel.postMessage({ type: 'cancel-file', id })
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+    channel.close()
+  }, old)
+  await addTerm(page, 'GND')
+  await page.getByTitle('GND · 文档 B · 下一处', { exact: true }).click()
+  assert.equal(await page.locator('[data-position="1:GND"]').textContent(), '2 / 5')
+  assert.deepEqual(await page.locator('[role=alert]').allTextContents(), [])
+  assert.equal(await page.getByLabel('文档 B 密码', { exact: true }).count(), 0)
 })

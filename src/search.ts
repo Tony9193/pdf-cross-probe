@@ -10,6 +10,7 @@ function normalize(text: string) {
   let offset = 0
   for (const character of text) {
     const normalized = character.normalize('NFKC').toUpperCase()
+    // 归一化或大写可能改变长度；为每个 UTF-16 单元保留原文范围，供结果定位。
     for (let index = 0; index < normalized.length; index++) {
       starts.push(offset)
       ends.push(offset + character.length)
@@ -42,6 +43,7 @@ function searchPreparedPages(pages: ReturnType<typeof normalize>[], keyword: str
       cursor = found + query.length
     }
   })
+  // 未强制宽松搜索时，全文有完整标识符匹配就优先返回它们；否则回退到包含匹配。
   if (!forceTolerant && exact.length) return { mode: 'exact', matches: exact }
   return { mode: 'tolerant', matches: contained }
 }
