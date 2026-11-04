@@ -1,0 +1,125 @@
+{
+  "version": "0.1.1",
+  "files": [
+    {
+      "file": ".gitignore",
+      "sha256": "d439f7ee28a530048180530c661f5fa4b92632dcdb0163c4f4275df3ac2101fa"
+    },
+    {
+      "file": ".oxlintrc.json",
+      "sha256": "b4d344818a1e1bf43997e4744a9153c8eef770c98b58229cd86363dabb85ded4"
+    },
+    {
+      "file": "PUBLISHING.md",
+      "sha256": "24d5e70be56cfebad15cb64bd24b0ecfdbab0bd19d4da2bbed99ae5207accaaa"
+    },
+    {
+      "file": "README.md",
+      "sha256": "97f807338a0b6ef7848c9b966ce78af6b401505b9fdb7209cb431a4608a710bc"
+    },
+    {
+      "file": "electron/main.cjs",
+      "sha256": "1ec05d4a735a30ce42e58183ff4802886d83f03dfed84ec011e7dbac38e6191c"
+    },
+    {
+      "file": "index.html",
+      "sha256": "4cddc537a369b45e40539e45729cd75146ff230c8e72384245a86cc63d549c72"
+    },
+    {
+      "file": "package-lock.json",
+      "sha256": "13c17e59605ee067c2db58e3eb481852fe54bbd56bd7ee14fdc7f945f7f5f604"
+    },
+    {
+      "file": "package.json",
+      "sha256": "2dfa9c17d37866f07c6137a01402440eaa2f8fbda61dbfea0f0b8383fb69f27e"
+    },
+    {
+      "file": "portable/README.txt",
+      "sha256": "2e69e1ca7a1db7feeeb96af3873b4a133075b15e4f3df215070a71ab041df1f1"
+    },
+    {
+      "file": "portable/Start.cmd",
+      "sha256": "f059def09eadc2671f794a90b04546a34452cfc026855e568bcf448aabc9e6a5"
+    },
+    {
+      "file": "public/favicon.svg",
+      "sha256": "61bc9a161de58248288e6905425d7180f0624c2865007b97d763fdac12043a66"
+    },
+    {
+      "file": "public/icons.svg",
+      "sha256": "b45fa506195cfcdef406ba9f0c77b36ddc1a7c224040926ec70abc2fdea7b93a"
+    },
+    {
+      "file": "scripts/audit-distribution.mjs",
+      "sha256": "d6ad3e878abb47cdc1114c0f0c8391d694c0f934bc13035e9998ad40822167a2"
+    },
+    {
+      "file": "scripts/export-public.mjs",
+      "sha256": "89617208667313393d2af2cf2c6c77439b6a9a985fb3be4ad69cbe6c8c221e1d"
+    },
+    {
+      "file": "scripts/public-source.mjs",
+      "sha256": "6c305ecddedd2fddb7ca1ba16be142c0a9bd256d1496c85353910ab1f530909f"
+    },
+    {
+      "file": "src/App.css",
+      "sha256": "ce3010a7f6f762a8b0892565fe7068ab32bb64450da01773b3d8a2e20e30b38d"
+    },
+    {
+      "file": "src/App.tsx",
+      "sha256": "962375559e55798a80b4519f2efd88a74852d0cd3a15d6f1ebdf961b86a3677b"
+    },
+    {
+      "file": "src/PdfPane.tsx",
+      "sha256": "219b2bf07bdb7b7ed904b485b65c4f4be4327fa07077be1f94ee18fa6eb5bc32"
+    },
+    {
+      "file": "src/index.css",
+      "sha256": "00a3c8798a75cc3850e151d48c56b64d1dad950ac20d0970dff229950c4cb715"
+    },
+    {
+      "file": "src/main.tsx",
+      "sha256": "6e9e5807fcbd48b75a96db5cbef36c996262196be42e6d4760dc86babbe61ad2"
+    },
+    {
+      "file": "src/pdf.ts",
+      "sha256": "538383a1a0b0bf05d24c236b3edbe607857b84500a0eca0aae2e708e7ce38688"
+    },
+    {
+      "file": "src/search.ts",
+      "sha256": "a0b1fe1393bdbb537be8740fff8b18708be459f3eee790a5e579e19809fd39e3"
+    },
+    {
+      "file": "tests/electron.test.mjs",
+      "sha256": "f191cc0864efe4000d2d8cd17344d22b8ec2d16cbb811d6e73c55977fba9c2d2"
+    },
+    {
+      "file": "tests/public-source.test.mjs",
+      "sha256": "6235644ba1238642caa1e774816f589267ab64a3b7402ca43c5f10a92b04e05c"
+    },
+    {
+      "file": "tests/search.test.ts",
+      "sha256": "0b43857c260fb61ee9ba9fbe72f6f98decaf7bbb9fe2d057e7c9d1e6d682cd83"
+    },
+    {
+      "file": "tests/viewer.test.mjs",
+      "sha256": "b15398ac4f28a4341a9b499ce0400423abad33b643364119fdfb05b916c0aa86"
+    },
+    {
+      "file": "tsconfig.app.json",
+      "sha256": "8e5d12ba330e7d86409edec74b95451e0db22ee09b9426c94b5bf817571eddb0"
+    },
+    {
+      "file": "tsconfig.json",
+      "sha256": "770b4140bbb581e2dfd9ea9946ffc9c75a1d86ba7d2db5f77c83e37cbdf9d808"
+    },
+    {
+      "file": "tsconfig.node.json",
+      "sha256": "d366cc0827139db39c61815f22491bbfda56c654354a42ad7795143d314e45e8"
+    },
+    {
+      "file": "vite.config.ts",
+      "sha256": "cd85649115ae0c34e3b89c4c53409c740b5f1ce77a676b132efd554d8af60b4d"
+    }
+  ]
+}

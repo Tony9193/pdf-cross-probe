@@ -1,0 +1,12 @@
+:root { font-family: 'Bahnschrift', 'Microsoft YaHei UI', sans-serif; font-size: 13px; color: #25332f; background: #f4f6f5; font-synthesis: none; letter-spacing: 0; --accent: #14775e; --border: #d7dfdb; --muted: #6a7972; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+button, input, textarea, select { font: inherit; color: inherit; }
+button { cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid transparent; background: transparent; min-width: 30px; height: 30px; border-radius: 4px; padding: 0 7px; }
+button:hover { background: #e8efeb; }
+button:disabled { opacity: .4; cursor: default; }
+button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid #1975d2; outline-offset: 2px; }
+button svg { flex-shrink: 0; }
+h1, h2, p { margin: 0; letter-spacing: 0; }
+h1 { font-size: 17px; font-weight: 650; }
+h2 { font-size: 13px; font-weight: 650; }
