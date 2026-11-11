@@ -4,7 +4,7 @@ A local PDF.js viewer for linked schematic and reference-designator searches. PD
 
 ## Run
 
-For Windows users, extract `release/0.1.2/PDF-Cross-Probe-0.1.2-win-x64.zip`, or copy the complete `release/0.1.2/win-unpacked` directory. Double-click `PDF Cross Probe.exe` or `Start.cmd`. The EXE needs its companion files; do not copy it alone. Python, Node.js, WebView2, a local server and an internet connection are not required. This unsigned build may require approval under Windows or company security policy; do not disable security software. Chinese usage instructions are included in `README.txt`. Versioned output keeps an already-running older release untouched.
+For Windows users, extract `release/1.0.0/PDF-Cross-Probe-1.0.0-win-x64.zip`, or copy the complete `release/1.0.0/win-unpacked` directory. Double-click `PDF Cross Probe.exe` or `Start.cmd`. The EXE needs its companion files; do not copy it alone. Python, Node.js, WebView2, a local server and an internet connection are not required. This unsigned build may require approval under Windows or company security policy; do not disable security software. Chinese usage instructions are included in `README.txt`. Versioned output keeps an already-running older release untouched.
 
 Development requires Node.js and npm:
 
@@ -23,6 +23,10 @@ The desktop app serves bundled assets through a restricted `app://viewer` protoc
 - Standard RC4, AES-128 and AES-256 encrypted PDFs are covered by tests. Supply a known opening or owner password; this is not a password-recovery tool. Passwords are used only in current-session memory and local window messages, not written to application storage, URLs or logs.
 - Enter one keyword per line and use the search command to append highlights. The last submitted word becomes active; other words retain highlights but display an unlocated status until selected.
 - Clicking diagram text adds the complete word, preserves the clicked location in that pane, and locates its first match in the other document. Adjacent text fragments share one complete highlight outline.
+- Drag across selectable PDF text to see a blue selection and use Ctrl+C (or the desktop right-click menu) to copy it; paste with Ctrl+V into an editable field or another application. Switch off the hand tool first. Image-only or non-extractable text cannot be selected this way.
+- Drag the divider between the two document panes to resize them, or double-click it to return to an even split. Dragging the divider all the way to either edge smoothly collapses that pane and leaves a triangle tab on the edge; click or drag the triangle tab inward to expand the pane back to its previous split. The divider also supports arrow keys, Home and End; the horizontal and vertical layouts keep independent proportions.
+- Toggle the left search sidebar (`Ctrl+F` to focus search), swap A/B pane positions with one click, rotate a diagram in 90° steps (`R` shortcut or toolbar button), and use `F3` / `Shift+F3` to step through matches.
+- Open the Preferences dialog (`设置`) to switch themes (Light, Dark CAD, or System), adjust PADS spotlight mask opacity, set default highlight/tolerance/auto-fit/layout-memory preferences, configure how external PDFs opened from Windows Explorer are assigned (`Single -> A, Dual -> A+B` by default, `Smart A -> B`, or `Ask every time`), and register or remove per-user Windows Explorer right-click menu & "Open with" associations without administrator privileges.
 - Click a keyword to locate its first match in each document.
 - Previous/next arrows traverse all matches in the selected document, with a current/total counter and wraparound.
 - Consecutive clicks on the active word's current page cycle through that page's matches. Returning from another page or another active word starts with its first match.

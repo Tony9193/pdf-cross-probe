@@ -1,5 +1,5 @@
 {
-  "version": "0.1.2",
+  "version": "1.0.0",
   "files": [
     {
       "file": ".gitignore",
@@ -15,11 +15,15 @@
     },
     {
       "file": "README.md",
-      "sha256": "99f8d3ea7847617f3b319ab37c7b29673b74f4aa7bbb9148c8f0b9ac51877abf"
+      "sha256": "dbdacee6994fd338c3b2eb55f9712c531d87abffef13abd8497f7d5e73c534b0"
     },
     {
       "file": "electron/main.cjs",
-      "sha256": "1ec05d4a735a30ce42e58183ff4802886d83f03dfed84ec011e7dbac38e6191c"
+      "sha256": "8c4ae4a5e2c577c4e210f13b518105c9374b8f198f60ec8c3372b66db060fea8"
+    },
+    {
+      "file": "electron/preload.cjs",
+      "sha256": "9babf6024ac25e283505ebef7c6cbff0929a164d656202d734092fa7d0c768f5"
     },
     {
       "file": "index.html",
@@ -27,15 +31,15 @@
     },
     {
       "file": "package-lock.json",
-      "sha256": "b144f7ef8347f672f405ca91e8282c54bacfb634c0176402e74e96872f835145"
+      "sha256": "4d89baa029ea733e69ab2220f6dda7f73b0b4b3585460c470eae2885b6602fd7"
     },
     {
       "file": "package.json",
-      "sha256": "b21b9648fa9f9896d97155bcb676b7957144754cb4f61037a7c5106ecb5ab325"
+      "sha256": "489f1dbe235c2c4e4c05a4758ca9d2efd07f5fe1f308d57825f6d11ed6e3af55"
     },
     {
       "file": "portable/README.txt",
-      "sha256": "d21af47d0b3c4f310a8351bcf06696d9efe2dbda10f5610fc1c8070df607bea1"
+      "sha256": "77ad0c57c8262964e3526a1e4add161dd61a3f8159cb1334f80745779df92ce8"
     },
     {
       "file": "portable/Start.cmd",
@@ -63,23 +67,23 @@
     },
     {
       "file": "src/App.css",
-      "sha256": "ad23543af5a817f8125888c6942fdbeaf3bfd59c6d4125a6c41ac83dd47661b6"
+      "sha256": "f5ec0bde0682911c588decf170c9c12ec4ec3cdb7b7da45c08a2ee0cbdb4e6d7"
     },
     {
       "file": "src/App.tsx",
-      "sha256": "408b1561e5922266b547ebad505724c9af946e5659e6485e1ec6990d14259825"
+      "sha256": "140016fac8443babf6d5541b4566405ae922bbb3e0a0798f0480391d59c2621e"
     },
     {
       "file": "src/PdfPane.tsx",
-      "sha256": "2e1e223ba7f1d695661bbeaa25a917898cee24ab937eea0fc8cabb801f3b2731"
+      "sha256": "092a509805d0eaa97c08df83733f9c52274455e279291a4cebcaf49ac48594d6"
     },
     {
       "file": "src/index.css",
-      "sha256": "00a3c8798a75cc3850e151d48c56b64d1dad950ac20d0970dff229950c4cb715"
+      "sha256": "65c390b491fe4c673797e1e516079b16e44e8a7f392b456f971bc6a77aaa7bd8"
     },
     {
       "file": "src/main.tsx",
-      "sha256": "6e9e5807fcbd48b75a96db5cbef36c996262196be42e6d4760dc86babbe61ad2"
+      "sha256": "88a90a1e275869b177578367156a8317dfab7eade8a797d7b2665678e180de3f"
     },
     {
       "file": "src/pdf.ts",
@@ -91,7 +95,7 @@
     },
     {
       "file": "tests/electron.test.mjs",
-      "sha256": "03e8fed299bbd3aa9856778ab42c70e0fed1cd77cddcb799ed0b7c01498b78b0"
+      "sha256": "93835034ae1a8b7f1ecbdf6293cdee459be7d1cb8de3233111dd6ad51d84e1a6"
     },
     {
       "file": "tests/encrypted-fixture.mjs",
@@ -107,7 +111,7 @@
     },
     {
       "file": "tests/viewer.test.mjs",
-      "sha256": "7c8bce9e83b8d2b4c34e4a26e75977ecca5ab159b8752501b3d205a1497a7007"
+      "sha256": "dad54ae7c3f0f5fa18de7181bdc6d40660abc98ae6447d0218398538fb86d8f8"
     },
     {
       "file": "tsconfig.app.json",

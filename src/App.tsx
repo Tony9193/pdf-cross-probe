@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { PasswordResponses } from 'pdfjs-dist'
 import type { PDFDocumentLoadingTask } from 'pdfjs-dist'
-import { ChevronLeft, ChevronRight, Columns2, Rows2, Search, Spotlight, Square, X, PanelsTopLeft, MonitorUp, Trash2 } from 'lucide-react'
+import { ArrowLeftRight, Check, ChevronLeft, ChevronRight, Columns2, ExternalLink, Moon, Monitor, MonitorUp, PanelLeftClose, PanelLeftOpen, PanelsTopLeft, Rows2, Search, Settings, Spotlight, Square, Sun, Trash2, X } from 'lucide-react'
 import PdfPane from './PdfPane'
 import type { ColoredMatch, Navigation, PasswordPrompt, TextSelection } from './PdfPane'
 import { createPdfTask, indexPage } from './pdf'
@@ -11,16 +11,92 @@ import type { SearchResult } from './search'
 import './App.css'
 
 const palette = ['#e33c41', '#14856d', '#1975d2', '#c27700', '#bc438f', '#5b64bc', '#008b9b', '#765629']
+const settingsStorageKey = 'pdf-cross-probe:settings:v1'
+type ThemeMode = 'light' | 'dark' | 'system'
+type ExternalOpenPolicy = 'single-a-dual-ab' | 'smart-a-then-b' | 'ask'
+type AppSettings = {
+  theme: ThemeMode
+  externalOpenPolicy: ExternalOpenPolicy
+  dimOpacity: number
+  defaultDim: boolean
+  defaultTolerant: boolean
+  autoFitOnLoad: boolean
+  rememberLayout: boolean
+  savedVertical: boolean
+  savedSplits: { horizontal: number; vertical: number }
+}
+const defaultSettings: AppSettings = {
+  theme: 'light',
+  externalOpenPolicy: 'single-a-dual-ab',
+  dimOpacity: 0.62,
+  defaultDim: false,
+  defaultTolerant: false,
+  autoFitOnLoad: false,
+  rememberLayout: true,
+  savedVertical: false,
+  savedSplits: { horizontal: 50, vertical: 50 },
+}
+
+function loadSettings(): AppSettings {
+  try {
+    const raw = localStorage.getItem(settingsStorageKey)
+    if (!raw) return defaultSettings
+    const parsed = JSON.parse(raw) as Partial<AppSettings>
+    return {
+      theme: parsed.theme === 'dark' || parsed.theme === 'system' ? parsed.theme : 'light',
+      externalOpenPolicy: parsed.externalOpenPolicy === 'smart-a-then-b' || parsed.externalOpenPolicy === 'ask' ? parsed.externalOpenPolicy : 'single-a-dual-ab',
+      dimOpacity: typeof parsed.dimOpacity === 'number' ? Math.max(0.25, Math.min(0.85, parsed.dimOpacity)) : 0.62,
+      defaultDim: Boolean(parsed.defaultDim),
+      defaultTolerant: Boolean(parsed.defaultTolerant),
+      autoFitOnLoad: Boolean(parsed.autoFitOnLoad),
+      rememberLayout: parsed.rememberLayout !== false,
+      savedVertical: Boolean(parsed.savedVertical),
+      savedSplits: {
+        horizontal: typeof parsed.savedSplits?.horizontal === 'number' ? Math.max(15, Math.min(85, parsed.savedSplits.horizontal)) : 50,
+        vertical: typeof parsed.savedSplits?.vertical === 'number' ? Math.max(15, Math.min(85, parsed.savedSplits.vertical)) : 50,
+      },
+    }
+  } catch { return defaultSettings }
+}
+
+type LaunchPayload = { targetSlot: number | null; files: { name: string; bytes: Uint8Array }[] }
+type DesktopBridge = {
+  isDesktop: boolean
+  consumeLaunchQueue: () => Promise<LaunchPayload[]>
+  onLaunchFiles: (callback: (payload: LaunchPayload) => void) => () => void
+  getShellStatus: () => Promise<{ supported: boolean; enabled: boolean; executablePath: string }>
+  setShellIntegration: (enabled: boolean) => Promise<{ supported: boolean; enabled: boolean; executablePath: string }>
+}
+declare global {
+  interface Window { pdfCrossProbeDesktop?: DesktopBridge }
+}
+
 type Term = { id: string; value: string; color: string }
 type DocumentInfo = { id: string; name: string; bytes: Uint8Array; password?: string }
-type SharedState = { terms: Term[]; dim: boolean; tolerant: boolean[] }
-type DocumentMetadata = { id: string; name: string; indexed: number; ready: boolean; texts: string[] }
-type RemoteDocument = { id: string; name: string; indexed: number; ready: boolean; search: DocumentSearchIndex }
+type SharedState = { terms: Term[]; dim: boolean; tolerant: boolean[]; settings?: AppSettings }
+type DocumentMetadata = { id: string; name: string; indexed: number; ready: boolean; waitingPassword?: boolean; texts: string[] }
+type RemoteDocument = { id: string; name: string; indexed: number; ready: boolean; waitingPassword?: boolean; search: DocumentSearchIndex }
 type MatchPosition = { documentId: string; index: number; mode: SearchResult['mode'] }
 type FocusTarget = { slot: number; termId: string; position: MatchPosition; navigation: Navigation; active?: boolean }
 
 function App() {
   const detached = new URLSearchParams(location.search).get('panel') === 'right'
+  const [settings, setSettings] = useState<AppSettings>(() => loadSettings())
+  const settingsRef = useRef(settings)
+  settingsRef.current = settings
+  const [systemDark, setSystemDark] = useState(() => window.matchMedia('(prefers-color-scheme: dark)').matches)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [shellStatus, setShellStatus] = useState<{ supported: boolean; enabled: boolean; executablePath: string } | null>(null)
+  const [shellBusy, setShellBusy] = useState(false)
+  const [pendingExternalFile, setPendingExternalFile] = useState<{ name: string; bytes: Uint8Array } | null>(null)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [swapped, setSwapped] = useState(false)
+  const [activeSlot, setActiveSlot] = useState<0 | 1>(0)
+  const activeSlotRef = useRef<0 | 1>(0)
+  activeSlotRef.current = activeSlot
+  const [rotationTriggers, setRotationTriggers] = useState([0, 0])
+  const searchInputRef = useRef<HTMLTextAreaElement>(null)
+  const activeTermIdRef = useRef<string | null>(null)
   const [documents, setDocuments] = useState<(DocumentSession | null)[]>([null, null])
   const [remoteLeft, setRemoteLeft] = useState<RemoteDocument | null>(null)
   const remoteLeftRef = useRef(remoteLeft)
@@ -35,10 +111,23 @@ function App() {
   const viewsRef = useRef<(null | { documentId: string; page: number })[]>([null, null])
   const [errors, setErrors] = useState(['', '']), [loading, setLoading] = useState([false, false])
   const [passwordPrompts, setPasswordPrompts] = useState<(PasswordPrompt | null)[]>([null, null])
+  const passwordPromptsRef = useRef(passwordPrompts)
+  passwordPromptsRef.current = passwordPrompts
   const [terms, setTerms] = useState<Term[]>([]), [input, setInput] = useState('')
-  const [tolerant, setTolerant] = useState([false, false]), [dim, setDim] = useState(false)
+  const [tolerant, setTolerant] = useState(() => [settings.defaultTolerant, settings.defaultTolerant])
+  const [dim, setDim] = useState(() => settings.defaultDim)
   const previousTolerance = useRef(tolerant)
-  const [vertical, setVertical] = useState(false), [separated, setSeparated] = useState(false)
+  const [vertical, setVertical] = useState(() => settings.rememberLayout ? settings.savedVertical : false), [separated, setSeparated] = useState(false)
+  const [narrow, setNarrow] = useState(() => window.matchMedia('(max-width: 650px)').matches)
+  const [splitSizes, setSplitSizes] = useState(() => settings.rememberLayout ? settings.savedSplits : { horizontal: 50, vertical: 50 })
+  const [collapsedPane, setCollapsedPane] = useState<0 | 1 | null>(null)
+  const [dragSplit, setDragSplit] = useState<number | null>(null)
+  const [dragHint, setDragHint] = useState<0 | 1 | null>(null)
+  const [transitioningSlot, setTransitioningSlot] = useState<0 | 1 | null>(null)
+  const transitionTimerRef = useRef(0)
+  const dividerDragRef = useRef<{ pointerId: number; originSplit: number; fromCollapsed: 0 | 1 | null; startX: number; startY: number; moved: boolean } | null>(null)
+  const suppressTabClickRef = useRef(false)
+  const panesRef = useRef<HTMLDivElement>(null)
   const [navigation, setNavigation] = useState<(Navigation | null)[]>([null, null])
   const [positions, setPositions] = useState<Record<string, MatchPosition>>({})
   const positionsRef = useRef(positions), navigationRef = useRef(navigation)
@@ -49,8 +138,27 @@ function App() {
   const statsRef = useRef(statsDocuments)
   statsRef.current = statsDocuments
   const channel = useRef<BroadcastChannel | null>(null), childWindow = useRef<Window | null>(null)
-  const stateRef = useRef<SharedState>({ terms, dim, tolerant }), colorCounter = useRef(0)
-  documentsRef.current = documents; termsRef.current = terms; stateRef.current = { terms, dim, tolerant }
+  const stateRef = useRef<SharedState>({ terms, dim, tolerant, settings }), colorCounter = useRef(0)
+  documentsRef.current = documents; termsRef.current = terms; stateRef.current = { terms, dim, tolerant, settings }
+
+  const resolvedTheme = settings.theme === 'system' ? (systemDark ? 'dark' : 'light') : settings.theme
+  useEffect(() => {
+    document.documentElement.dataset.theme = resolvedTheme
+  }, [resolvedTheme])
+
+  useEffect(() => {
+    try { localStorage.setItem(settingsStorageKey, JSON.stringify(settings)) } catch { /* ignore storage errors */ }
+  }, [settings])
+
+  useEffect(() => {
+    const query = window.matchMedia('(max-width: 650px)')
+    const update = () => setNarrow(query.matches)
+    query.addEventListener('change', update)
+    const darkQuery = window.matchMedia('(prefers-color-scheme: dark)')
+    const updateDark = () => setSystemDark(darkQuery.matches)
+    darkQuery.addEventListener('change', updateDark)
+    return () => { query.removeEventListener('change', update); darkQuery.removeEventListener('change', updateDark) }
+  }, [])
 
   function searchResult(session: DocumentSession | RemoteDocument, term: Term, slot: number): SearchResult {
     const result = session.search.search(term.value, stateRef.current.tolerant[slot])
@@ -108,13 +216,29 @@ function App() {
     return targets
   }
 
+  function changeCollapsed(next: 0 | 1 | null) {
+    setCollapsedPane(previous => {
+      if (previous === next) return previous
+      const affected = next ?? previous
+      if (affected !== null) {
+        window.clearTimeout(transitionTimerRef.current)
+        setTransitioningSlot(affected)
+        transitionTimerRef.current = window.setTimeout(() => setTransitioningSlot(null), 340)
+      }
+      return next
+    })
+  }
+
   function sendFocus(termId: string, page?: number, slot?: number, direction?: number) {
+    activeTermIdRef.current = termId
+    if (slot !== undefined && collapsedPane === slot) changeCollapsed(null)
     const targets = locate(termId, page, slot, direction)
     channel.current?.postMessage({ type: 'focus', targets })
   }
 
   function setKeywordState(next: Term[]) {
     const allowed = new Set(next.map(term => term.id))
+    if (activeTermIdRef.current && !allowed.has(activeTermIdRef.current)) activeTermIdRef.current = next.at(-1)?.id ?? null
     const updated = Object.fromEntries(Object.entries(positionsRef.current).filter(([key]) => allowed.has(key.slice(key.indexOf(':') + 1))))
     const navigation = navigationRef.current.map(value => value && next.some(term => term.value === value.term) ? value : null)
     pendingFocus.current = pendingFocus.current.filter(target => allowed.has(target.termId))
@@ -138,13 +262,22 @@ function App() {
   }
 
   function broadcast(state: SharedState, targets?: FocusTarget[]) { channel.current?.postMessage({ type: 'state', state, targets }) }
+  function updateSettings(patch: Partial<AppSettings>) {
+    setSettings(current => {
+      const next = { ...current, ...patch, savedSplits: patch.savedSplits ?? current.savedSplits }
+      stateRef.current = { ...stateRef.current, settings: next }
+      channel.current?.postMessage({ type: 'settings', settings: next })
+      return next
+    })
+  }
   function addTerms(values: string[], source?: { slot: number; selection: TextSelection }) {
     const next = [...termsRef.current]
     for (const value of values) {
       if (!next.some(term => term.value.toUpperCase() === value.toUpperCase())) next.push({ id: crypto.randomUUID(), value, color: palette[colorCounter.current++ % palette.length] })
     }
     setKeywordState(next)
-    const focus = next.find(term => term.value.toUpperCase() === values.at(-1)?.toUpperCase())?.id
+    const focus = next.find(term => term.value.toUpperCase() === values.at(-1)?.toUpperCase())?.id ?? null
+    activeTermIdRef.current = focus
     const targets = focus ? locate(focus, undefined, undefined, undefined, source) : []
     broadcast({ ...stateRef.current, terms: next }, targets)
   }
@@ -164,7 +297,7 @@ function App() {
     const search = current?.id === value.id ? current.search : new DocumentSearchIndex()
     const start = current?.id === value.id ? current.indexed : 0
     for (const text of value.texts.slice(start)) search.append(text)
-    const next = { id: value.id, name: value.name, indexed: value.indexed, ready: value.ready, search }
+    const next = { id: value.id, name: value.name, indexed: value.indexed, ready: value.ready, waitingPassword: value.waitingPassword, search }
     remoteLeftRef.current = next
     statsRef.current = [next, documentsRef.current[1]]
     setRemoteLeft(next)
@@ -207,16 +340,22 @@ function App() {
         }
         const attempts = ++passwordAttempts.current[slot]
         passwordCallbacks.current[slot] = updatePassword
+        passwordsRef.current[slot] = undefined
+        if (pendingFilesRef.current[slot]?.id === id) {
+          pendingFilesRef.current[slot] = { id, name, bytes }
+        }
         const incorrect = reason === PasswordResponses.INCORRECT_PASSWORD
         setLoading(value => value.map((item, index) => index === slot ? false : item))
         setErrors(value => value.map((item, index) => index === slot ? '' : item))
         setPasswordPrompts(value => value.map((item, index) => index === slot ? { id, name, incorrect, attempts } : item))
+        if (slot === 0) channel.current?.postMessage({ type: 'left-index', left: { id, name, indexed: 0, ready: false, waitingPassword: true, texts: [] } })
       }
       const pdf = await task.promise
       if (revisions.current[slot] !== revision) { await pdf.loadingTask.destroy(); return }
       passwordCallbacks.current[slot] = null
       pendingFilesRef.current[slot] = null
       setPasswordPrompts(value => value.map((item, index) => index === slot ? null : item))
+      if (slot === 0) channel.current?.postMessage({ type: 'left-index', left: { id, name, indexed: 0, ready: false, waitingPassword: false, texts: [] } })
       const session: DocumentSession = { id, name, bytes, password: passwordsRef.current[slot], pdf, pages: [], indexed: 0, ready: false, search: new DocumentSearchIndex() }
       setDocuments(value => value.map((item, index) => index === slot ? session : item))
       for (let page = 1; page <= pdf.numPages; page++) {
@@ -261,6 +400,10 @@ function App() {
     setPasswordPrompts(value => value.map((item, index) => index === slot ? null : item))
     setErrors(value => value.map((item, index) => index === slot ? '' : item))
     setLoading(value => value.map((item, index) => index === slot ? true : item))
+    if (slot === 0 && readRequests.current[0]) {
+      const pendingName = pendingFilesRef.current[0]?.name ?? ''
+      channel.current?.postMessage({ type: 'left-index', left: { id: readRequests.current[0], name: pendingName, indexed: 0, ready: false, waitingPassword: false, texts: [] } })
+    }
     callback(password)
   }
 
@@ -282,6 +425,45 @@ function App() {
     void currentTask?.destroy().catch(() => {})
   }
 
+  async function loadBytesToSlot(slot: 0 | 1, name: string, bytes: Uint8Array) {
+    const id = crypto.randomUUID()
+    readRequests.current[slot] = id
+    const copy = new Uint8Array(bytes)
+    if (slot === 1) channel.current?.postMessage({ type: 'file', file: { id, name, bytes: copy } })
+    await loadDocument(slot, name, copy, id)
+  }
+
+  function handleLaunchPayload(payload: LaunchPayload) {
+    if (detached || !payload?.files?.length) return
+    if (payload.targetSlot === 0 || payload.targetSlot === 1) {
+      const target = payload.targetSlot
+      if (collapsedPane === target) changeCollapsed(null)
+      void loadBytesToSlot(target, payload.files[0].name, payload.files[0].bytes)
+      return
+    }
+    if (payload.files.length >= 2) {
+      changeCollapsed(null)
+      void loadBytesToSlot(0, payload.files[0].name, payload.files[0].bytes)
+      void loadBytesToSlot(1, payload.files[1].name, payload.files[1].bytes)
+      return
+    }
+    const single = payload.files[0]
+    const policy = settingsRef.current.externalOpenPolicy
+    if (policy === 'ask') {
+      setPendingExternalFile({ name: single.name, bytes: new Uint8Array(single.bytes) })
+      return
+    }
+    if (policy === 'smart-a-then-b') {
+      const hasA = Boolean(documentsRef.current[0] || pendingFilesRef.current[0] || passwordPromptsRef.current[0])
+      const slot: 0 | 1 = hasA ? 1 : 0
+      if (collapsedPane === slot) changeCollapsed(null)
+      void loadBytesToSlot(slot, single.name, single.bytes)
+      return
+    }
+    if (collapsedPane === 0) changeCollapsed(null)
+    void loadBytesToSlot(0, single.name, single.bytes)
+  }
+
   async function loadFile(slot: number, file: File) {
     const id = crypto.randomUUID(); readRequests.current[slot] = id
     try {
@@ -289,7 +471,11 @@ function App() {
       if (readRequests.current[slot] !== id) return
       if (slot === 1) channel.current?.postMessage({ type: 'file', file: { id, name: file.name, bytes } })
       await loadDocument(slot, file.name, bytes, id)
-    } catch (error) { setErrors(value => value.map((item, index) => index === slot ? String(error) : item)) }
+    } catch (error) {
+      if (readRequests.current[slot] !== id) return
+      cancelPassword(slot)
+      setErrors(value => value.map((item, index) => index === slot ? (error instanceof Error ? error.message : String(error)) : item))
+    }
   }
   async function loadSample(slot: number, name: string) {
     const id = crypto.randomUUID(); readRequests.current[slot] = id
@@ -300,7 +486,11 @@ function App() {
       if (readRequests.current[slot] !== id) return
       if (slot === 1) channel.current?.postMessage({ type: 'file', file: { id, name, bytes } })
       await loadDocument(slot, name, bytes, id)
-    } catch (error) { setErrors(value => value.map((item, index) => index === slot ? String(error) : item)) }
+    } catch (error) {
+      if (readRequests.current[slot] !== id) return
+      cancelPassword(slot)
+      setErrors(value => value.map((item, index) => index === slot ? (error instanceof Error ? error.message : String(error)) : item))
+    }
   }
 
   useEffect(() => {
@@ -313,10 +503,12 @@ function App() {
         setSeparated(true)
         const left = documentsRef.current[0], right = documentsRef.current[1]
         const rightFile: DocumentInfo | null = right ? { id: right.id, name: right.name, bytes: right.bytes, password: right.password } : pendingFilesRef.current[1]
-        communication.postMessage({ type: 'state', state: stateRef.current, left: left ? metadata(left) : null, right: rightFile, targets: snapshotFocus() })
+        const promptA = passwordPromptsRef.current[0]
+        communication.postMessage({ type: 'state', state: { ...stateRef.current, settings: settingsRef.current }, left: left ? metadata(left) : (promptA ? { id: promptA.id, name: promptA.name, indexed: 0, ready: false, waitingPassword: true, texts: [] } : null), right: rightFile, targets: snapshotFocus() })
       } else if (message.type === 'state') {
         const state = message.state as SharedState
         setKeywordState(state.terms); stateRef.current = state
+        if (state.settings) setSettings(state.settings)
         if ('left' in message) previousTolerance.current = state.tolerant
         colorCounter.current = Math.max(colorCounter.current, state.terms.length)
         setDim(state.dim); setTolerant(state.tolerant)
@@ -324,6 +516,8 @@ function App() {
         if (message.right) void loadDocument(1, message.right.name, new Uint8Array(message.right.bytes), message.right.id, message.right.password)
         if (message.targets) applyFocus(message.targets)
         else if (message.focus) locate(message.focus)
+      } else if (message.type === 'settings' && message.settings) {
+        setSettings(message.settings)
       } else if (message.type === 'file') void loadDocument(1, message.file.name, new Uint8Array(message.file.bytes), message.file.id, message.file.password)
       else if (message.type === 'password' && readRequests.current[1] === message.id) submitPassword(1, message.password, false)
       else if (message.type === 'cancel-file' && readRequests.current[1] === message.id) cancelPassword(1, false)
@@ -342,6 +536,48 @@ function App() {
     if (import.meta.env.DEV) void fetch('/__samples').then(response => response.ok ? response.json() : []).then(setSamples).catch(() => {})
     return () => { window.removeEventListener('beforeunload', unload); communication.close() }
   }, [])
+
+  useEffect(() => {
+    const desktop = window.pdfCrossProbeDesktop
+    if (!desktop || detached) return
+    void desktop.getShellStatus().then(setShellStatus).catch(() => {})
+    void desktop.consumeLaunchQueue().then(batches => {
+      for (const batch of batches) handleLaunchPayload(batch)
+    }).catch(() => {})
+    return desktop.onLaunchFiles(payload => handleLaunchPayload(payload))
+  }, [])
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null
+      const editable = Boolean(target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable))
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') {
+        event.preventDefault()
+        setSidebarCollapsed(false)
+        window.setTimeout(() => { searchInputRef.current?.focus(); searchInputRef.current?.select() }, 20)
+        return
+      }
+      if (event.key === 'Escape') {
+        if (settingsOpen) { event.preventDefault(); setSettingsOpen(false); return }
+        if (pendingExternalFile) { event.preventDefault(); setPendingExternalFile(null); return }
+      }
+      if (event.key === 'F3' && termsRef.current.length > 0) {
+        event.preventDefault()
+        const termId = activeTermIdRef.current && termsRef.current.some(t => t.id === activeTermIdRef.current)
+          ? activeTermIdRef.current : termsRef.current.at(-1)!.id
+        sendFocus(termId, undefined, undefined, event.shiftKey ? -1 : 1)
+        return
+      }
+      if (!editable && !event.ctrlKey && !event.metaKey && !event.altKey && event.key.toLowerCase() === 'r') {
+        const slot = detached ? 1 : activeSlotRef.current
+        if (!documentsRef.current[slot]) return
+        event.preventDefault()
+        setRotationTriggers(current => current.map((v, idx) => idx === slot ? v + 1 : v))
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [settingsOpen, pendingExternalFile])
 
   useEffect(() => {
     for (const slot of [0, 1]) {
@@ -366,6 +602,7 @@ function App() {
   }, [documents[0]?.id, documents[0]?.ready, documents[1]?.id, documents[1]?.ready, remoteLeft?.id, remoteLeft?.ready, tolerant])
 
   useEffect(() => () => {
+    window.clearTimeout(transitionTimerRef.current)
     for (const slot of [0, 1]) {
       revisions.current[slot]++
       readRequests.current[slot] = ''
@@ -382,38 +619,186 @@ function App() {
     return () => clearInterval(timer)
   }, [detached, separated])
   function separate() {
+    setCollapsedPane(null); setDragSplit(null); setDragHint(null)
     const url = new URL(location.href); url.searchParams.set('panel', 'right')
     childWindow.current = window.open(url.href, '_blank')
     setConnectionError(childWindow.current ? '' : '新窗口未打开，请允许弹出窗口后重试')
   }
-  function restore() { channel.current?.postMessage({ type: 'restore' }); childWindow.current?.close(); setSeparated(false) }
-  const visibleSlots = detached ? [1] : separated ? [0] : [0, 1]
+  function restore() {
+    setCollapsedPane(null); setDragSplit(null); setDragHint(null)
+    channel.current?.postMessage({ type: 'restore' }); childWindow.current?.close(); setSeparated(false)
+  }
+  const visibleSlots = detached ? [1] : separated ? [0] : swapped ? [1, 0] : [0, 1]
+  const firstSlot = visibleSlots[0] as 0 | 1
+  const secondSlot = (visibleSlots[1] ?? 1) as 0 | 1
+  const stacked = vertical || narrow
+  const splitAxis = stacked ? 'vertical' : 'horizontal'
+  const split = splitSizes[splitAxis]
+  const activeCollapsed = visibleSlots.length === 2 ? collapsedPane : null
+  const visualSplit = activeCollapsed === firstSlot ? 0 : activeCollapsed === secondSlot ? 100 : (dragSplit ?? split)
+  const panesAnimated = dragSplit === null || activeCollapsed !== null
+  const persistSplits = (nextSplits: { horizontal: number; vertical: number }, nextVertical = vertical) => {
+    if (!settingsRef.current.rememberLayout) return
+    setSettings(current => ({ ...current, savedVertical: nextVertical, savedSplits: nextSplits }))
+  }
+  const resizeSplit = (value: number) => {
+    changeCollapsed(null)
+    const clamped = Math.max(15, Math.min(85, value))
+    setSplitSizes(current => {
+      const next = { ...current, [splitAxis]: clamped }
+      persistSplits(next)
+      return next
+    })
+  }
+  const startDividerDrag = (event: React.PointerEvent<HTMLElement>, fromCollapsed: 0 | 1 | null = null) => {
+    if (event.button !== 0) return
+    if (fromCollapsed === null) event.currentTarget.focus({ preventScroll: true })
+    event.currentTarget.setPointerCapture(event.pointerId)
+    dividerDragRef.current = { pointerId: event.pointerId, originSplit: split, fromCollapsed, startX: event.clientX, startY: event.clientY, moved: false }
+  }
+  const moveDivider = (event: React.PointerEvent<HTMLElement>) => {
+    const drag = dividerDragRef.current
+    if (!drag || drag.pointerId !== event.pointerId || !panesRef.current) return
+    const bounds = panesRef.current.getBoundingClientRect()
+    const length = stacked ? bounds.height : bounds.width
+    if (length <= 20) return
+    const distance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY)
+    if (!drag.moved) {
+      if (distance < (drag.fromCollapsed !== null ? 6 : 1)) return
+      drag.moved = true
+      if (drag.fromCollapsed !== null) suppressTabClickRef.current = true
+    }
+    const coordinate = Math.max(0, Math.min(length, stacked ? event.clientY - bounds.top : event.clientX - bounds.left))
+    const edgePx = Math.min(56, Math.max(24, length * 0.06))
+    const releasePx = edgePx + 20
+    const raw = drag.fromCollapsed !== null ? (coordinate / length) * 100 : ((coordinate - 5) / (length - 10)) * 100
+    const clampedRaw = Math.max(0, Math.min(100, raw))
+    if (drag.fromCollapsed !== null) {
+      const isStartEdge = drag.fromCollapsed === firstSlot
+      const edgeDist = isStartEdge ? coordinate : length - coordinate
+      if (edgeDist <= 14) {
+        changeCollapsed(drag.fromCollapsed); setDragSplit(null); setDragHint(null)
+        return
+      }
+      if (edgeDist > releasePx) drag.fromCollapsed = null
+      setCollapsedPane(null); setDragSplit(clampedRaw)
+      setDragHint(clampedRaw < 15 ? firstSlot : clampedRaw > 85 ? secondSlot : null)
+      if (edgeDist > edgePx) {
+        const nextVal = Math.max(15, Math.min(85, clampedRaw))
+        setSplitSizes(current => { const next = { ...current, [splitAxis]: nextVal }; persistSplits(next); return next })
+      }
+      return
+    }
+    if (collapsedPane === firstSlot) {
+      if (coordinate > releasePx) {
+        const nextVal = Math.max(15, Math.min(85, clampedRaw))
+        changeCollapsed(null); setDragSplit(clampedRaw); setDragHint(null)
+        setSplitSizes(current => { const next = { ...current, [splitAxis]: nextVal }; persistSplits(next); return next })
+      }
+      return
+    }
+    if (collapsedPane === secondSlot) {
+      if (length - coordinate > releasePx) {
+        const nextVal = Math.max(15, Math.min(85, clampedRaw))
+        changeCollapsed(null); setDragSplit(clampedRaw); setDragHint(null)
+        setSplitSizes(current => { const next = { ...current, [splitAxis]: nextVal }; persistSplits(next); return next })
+      }
+      return
+    }
+    if (coordinate <= edgePx) {
+      setDragHint(null); setDragSplit(null)
+      setSplitSizes(current => { const next = { ...current, [splitAxis]: drag.originSplit }; persistSplits(next); return next })
+      changeCollapsed(firstSlot)
+    } else if (length - coordinate <= edgePx) {
+      setDragHint(null); setDragSplit(null)
+      setSplitSizes(current => { const next = { ...current, [splitAxis]: drag.originSplit }; persistSplits(next); return next })
+      changeCollapsed(secondSlot)
+    } else {
+      const nextVal = Math.max(15, Math.min(85, clampedRaw))
+      setDragSplit(clampedRaw)
+      setDragHint(clampedRaw < 15 ? firstSlot : clampedRaw > 85 ? secondSlot : null)
+      setSplitSizes(current => { const next = { ...current, [splitAxis]: nextVal }; persistSplits(next); return next })
+    }
+  }
+  const stopDividerDrag = (event: React.PointerEvent<HTMLElement>) => {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+    const drag = dividerDragRef.current
+    if (!drag || drag.pointerId !== event.pointerId) return
+    dividerDragRef.current = null
+    if (drag.moved && drag.fromCollapsed !== null && panesRef.current) {
+      const bounds = panesRef.current.getBoundingClientRect()
+      const length = stacked ? bounds.height : bounds.width
+      const coordinate = Math.max(0, Math.min(length, stacked ? event.clientY - bounds.top : event.clientX - bounds.left))
+      const edgePx = Math.min(56, Math.max(24, length * 0.06))
+      const isStartEdge = drag.fromCollapsed === firstSlot
+      const edgeDist = isStartEdge ? coordinate : length - coordinate
+      if (edgeDist <= edgePx) {
+        setSplitSizes(current => { const next = { ...current, [splitAxis]: drag.originSplit }; persistSplits(next); return next })
+        changeCollapsed(drag.fromCollapsed)
+      } else {
+        const percent = Math.max(15, Math.min(85, (coordinate / length) * 100))
+        setSplitSizes(current => { const next = { ...current, [splitAxis]: percent }; persistSplits(next); return next })
+        changeCollapsed(null)
+      }
+    }
+    setDragSplit(null); setDragHint(null)
+  }
+  async function toggleShellIntegration(nextEnabled: boolean) {
+    const desktop = window.pdfCrossProbeDesktop
+    if (!desktop || shellBusy) return
+    setShellBusy(true)
+    try {
+      const updated = await desktop.setShellIntegration(nextEnabled)
+      setShellStatus(updated)
+    } catch { /* ignore */ } finally {
+      setShellBusy(false)
+    }
+  }
   const noText = (slot: number) => statsDocuments[slot]?.ready && !statsDocuments[slot]?.search.hasText
 
   return <main className="app-shell">
-    <header className="app-header"><div className="brand"><PanelsTopLeft size={22} /><div><h1>PDF 联动查看器</h1><span>Cross Probe / 本地原型</span></div></div>
+    <header className="app-header">
+      <div className="brand">
+        <button className="icon-button sidebar-toggle" title={sidebarCollapsed ? '展开搜索栏 (Ctrl+F)' : '收起搜索栏'} aria-label={sidebarCollapsed ? '展开搜索栏' : '收起搜索栏'} aria-pressed={!sidebarCollapsed} onClick={() => setSidebarCollapsed(value => !value)}>
+          {sidebarCollapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
+        </button>
+        <div className="brand-badge"><PanelsTopLeft size={19} /></div>
+        <div><h1>PDF 联动查看器</h1><span>Cross Probe · v1.0.0</span></div>
+      </div>
       <div className="header-actions">
-        {!detached && !separated && <div className="segmented"><button title="左右分屏" aria-pressed={!vertical} onClick={() => setVertical(false)}><Columns2 size={18} /></button><button title="上下分屏" aria-pressed={vertical} onClick={() => setVertical(true)}><Rows2 size={18} /></button></div>}
-        <div className="segmented"><button title="色块描边" aria-pressed={!dim} onClick={() => { setDim(false); broadcast({ ...stateRef.current, dim: false }) }}><Square size={18} /></button><button title="PADS 高亮模式" aria-pressed={dim} onClick={() => { setDim(true); broadcast({ ...stateRef.current, dim: true }) }}><Spotlight size={18} /></button></div>
-        {!detached && <button className="command" onClick={separated ? restore : separate}><MonitorUp size={17} />{separated ? '恢复双栏' : '双屏窗口'}</button>}<span className="local-badge">仅本机</span>
+        {!detached && !separated && <button className="command icon-command" title="互换 A/B 面板位置" aria-pressed={swapped} onClick={() => setSwapped(value => !value)}><ArrowLeftRight size={16} /><span>互换 A/B</span></button>}
+        {!detached && !separated && !narrow && <div className="segmented"><button title="左右分屏" aria-pressed={!vertical} onClick={() => { changeCollapsed(null); setVertical(false); persistSplits(splitSizes, false) }}><Columns2 size={17} /></button><button title="上下分屏" aria-pressed={vertical} onClick={() => { changeCollapsed(null); setVertical(true); persistSplits(splitSizes, true) }}><Rows2 size={17} /></button></div>}
+        <div className="segmented"><button title="色块描边" aria-pressed={!dim} onClick={() => { setDim(false); broadcast({ ...stateRef.current, dim: false }) }}><Square size={17} /></button><button title="PADS 高亮模式" aria-pressed={dim} onClick={() => { setDim(true); broadcast({ ...stateRef.current, dim: true }) }}><Spotlight size={17} /></button></div>
+        {!detached && <button className="command" onClick={separated ? restore : separate}><MonitorUp size={16} />{separated ? '恢复双栏' : '双屏窗口'}</button>}
+        <button className="command icon-command" title="偏好设置" aria-label="偏好设置" aria-expanded={settingsOpen} onClick={() => setSettingsOpen(true)}><Settings size={16} /><span>设置</span></button>
+        <span className="local-badge">仅本机</span>
       </div>
     </header>
     {connectionError && <div className="error" role="alert">{connectionError}</div>}
-    <div className="workspace"><aside className="search-sidebar">
-      <div className="sidebar-title"><h2>联动搜索</h2><span>{terms.length} 个关键词</span></div>
+    <div className="workspace"><aside className={`search-sidebar ${sidebarCollapsed ? 'is-collapsed' : ''}`} inert={sidebarCollapsed || undefined}>
+      <div className="sidebar-title"><h2>联动搜索</h2><span className="term-count-pill">{terms.length} 个关键词</span></div>
       <form onSubmit={event => { event.preventDefault(); addTerms(splitKeywords(input)); setInput('') }}>
-        <textarea aria-label="关键词" placeholder={'R3501\nVDD_IO'} value={input} onChange={event => setInput(event.target.value)} />
-        <button className="search-command" type="submit" disabled={!input.trim()}><Search size={16} />追加高亮</button>
+        <textarea ref={searchInputRef} aria-label="关键词" placeholder={'每行输入位号或网络名\n例如：R3501 / VDD_IO'} value={input}
+          onKeyDown={event => {
+            if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && input.trim()) {
+              event.preventDefault()
+              addTerms(splitKeywords(input))
+              setInput('')
+            }
+          }}
+          onChange={event => setInput(event.target.value)} />
+        <button className="search-command" type="submit" disabled={!input.trim()}><Search size={15} />追加高亮</button>
       </form>
-      <div className="results-heading"><h2>命中清单</h2><button title="清空关键词" disabled={!terms.length} onClick={() => { setKeywordState([]); broadcast({ ...stateRef.current, terms: [] }) }}><Trash2 size={16} /></button></div>
-      <div className="term-list">{terms.map(term => <section className="term-result" key={term.id}>
+      <div className="results-heading"><h2>命中清单</h2><button title="清空关键词" disabled={!terms.length} onClick={() => { setKeywordState([]); broadcast({ ...stateRef.current, terms: [] }) }}><Trash2 size={15} /></button></div>
+      <div className="term-list">{terms.length === 0 ? <div className="empty-terms">点击图纸上的位号/网络名，或在上方输入关键词开始双图联动定位</div> : terms.map(term => <section className="term-result" key={term.id}>
         <div className="term-heading"><button className="term-name" onClick={() => sendFocus(term.id)}><span className="swatch" style={{ background: term.color }} /><strong>{term.value}</strong></button>
-          <button title={`删除 ${term.value}`} onClick={() => { const next = termsRef.current.filter(value => value.id !== term.id); setKeywordState(next); broadcast({ ...stateRef.current, terms: next }) }}><X size={15} /></button></div>
+          <button className="term-remove" title={`删除 ${term.value}`} onClick={() => { const next = termsRef.current.filter(value => value.id !== term.id); setKeywordState(next); broadcast({ ...stateRef.current, terms: next }) }}><X size={14} /></button></div>
         {[0, 1].map(slot => {
           const result = results[slot].get(term.id), pages = [...new Set(result?.matches.map(match => match.page) ?? [])]
           const position = positions[`${slot}:${term.id}`]
           const current = position?.documentId === statsDocuments[slot]?.id && position?.mode === result?.mode && result?.matches[position.index] ? position.index : -1
-          return <div className="document-result" key={slot}><div><b>{slot === 0 ? 'A' : 'B'}</b><span>{!statsDocuments[slot] ? '未加载' : !statsDocuments[slot]?.ready ? `${result?.matches.length ?? 0} 处 · 索引中` : noText(slot) ? '仅查看' : result?.matches.length ? `${result.matches.length} 处` : '未命中'}</span>
+          const waitingPwd = passwordPrompts[slot] !== null || (slot === 0 && detached && remoteLeft?.waitingPassword)
+          return <div className="document-result" key={slot}><div><b className={`doc-tag doc-tag-${slot}`}>{slot === 0 ? 'A' : 'B'}</b><span>{waitingPwd ? '等待密码' : !statsDocuments[slot] ? '未加载' : !statsDocuments[slot]?.ready ? `${result?.matches.length ?? 0} 处 · 索引中` : noText(slot) ? '仅查看' : result?.matches.length ? `${result.matches.length} 处` : '未命中'}</span>
             {result?.mode === 'tolerant' && !!result.matches.length && !noText(slot) && <small>容错</small>}</div>
             {!!result?.matches.length && <div className="match-navigation">
               <button title={`${term.value} · 文档 ${slot === 0 ? 'A' : 'B'} · 上一处`} onClick={() => sendFocus(term.id, undefined, slot, -1)}><ChevronLeft size={14} /></button>
@@ -423,16 +808,167 @@ function App() {
             <div className="page-links">{pages.map(page => <button key={page} title={`${term.value} · 第 ${page} 页`} onClick={() => sendFocus(term.id, page, slot, 1)}>p.{page}<span>{result!.matches.filter(match => match.page === page).length}</span></button>)}</div>
           </div>
         })}
-      </section>)}</div><footer className="sidebar-footer">PDF.js · {import.meta.env.DEV ? '开发验证版' : '离线查看'}</footer>
+      </section>)}</div><footer className="sidebar-footer"><span>PDF.js · {import.meta.env.DEV ? '开发验证版' : '离线引擎'}</span><span>Ctrl+F 搜索 · F3 跳处</span></footer>
     </aside>
-    <div className={`panes ${vertical ? 'vertical' : ''} ${visibleSlots.length === 1 ? 'single' : ''}`}>
-      {visibleSlots.map(slot => <PdfPane key={slot} slot={slot} session={documents[slot]} error={errors[slot]} loading={loading[slot]} passwordPrompt={passwordPrompts[slot]} matches={colored[slot]} navigation={navigation[slot]} dim={dim} tolerant={tolerant[slot]} samples={samples}
+    <div ref={panesRef} className={`panes ${stacked ? 'vertical' : ''} ${visibleSlots.length === 1 ? 'single' : ''} ${panesAnimated ? 'panes-animated' : ''}`}
+      style={visibleSlots.length === 2 ? (stacked
+        ? { gridTemplateRows: `${visualSplit}fr ${activeCollapsed !== null ? 0 : 10}px ${100 - visualSplit}fr` }
+        : { gridTemplateColumns: `${visualSplit}fr ${activeCollapsed !== null ? 0 : 10}px ${100 - visualSplit}fr` }) : undefined}>
+      {visibleSlots.map((slot, index) => <Fragment key={slot}>{index === 1 && <div
+        className={`pane-divider ${activeCollapsed !== null ? 'is-hidden' : ''} ${dragHint !== null ? 'collapse-hint' : ''}`}
+        role="separator" tabIndex={activeCollapsed !== null ? -1 : 0} inert={activeCollapsed !== null || undefined}
+        aria-label="调整文档面板大小" aria-orientation={stacked ? 'horizontal' : 'vertical'} aria-valuemin={15} aria-valuemax={85} aria-valuenow={Math.round(split)}
+        title="拖动调整大小（拖到底可收起面板），双击重置" onPointerDown={event => startDividerDrag(event)}
+        onPointerMove={moveDivider} onPointerUp={stopDividerDrag} onPointerCancel={stopDividerDrag}
+        onDoubleClick={() => resizeSplit(50)} onKeyDown={event => {
+          const decrease = stacked ? 'ArrowUp' : 'ArrowLeft', increase = stacked ? 'ArrowDown' : 'ArrowRight'
+          if (event.key === decrease || event.key === increase) { event.preventDefault(); resizeSplit(split + (event.key === increase ? 2 : -2)) }
+          else if (event.key === 'Home') { event.preventDefault(); resizeSplit(15) }
+          else if (event.key === 'End') { event.preventDefault(); resizeSplit(85) }
+        }}><span /></div>}<PdfPane slot={slot} session={documents[slot]} error={errors[slot]} loading={loading[slot]}
+        collapsed={activeCollapsed === slot} transitioning={transitioningSlot === slot}
+        dimOpacity={settings.dimOpacity} autoFitOnLoad={settings.autoFitOnLoad} rotationTrigger={rotationTriggers[slot]}
+        passwordPrompt={passwordPrompts[slot]} matches={colored[slot]} navigation={navigation[slot]} dim={dim} tolerant={tolerant[slot]} samples={samples}
+        onActivate={() => setActiveSlot(slot as 0 | 1)}
         onFile={file => void loadFile(slot, file)} onSample={name => void loadSample(slot, name)}
         onPasswordSubmit={password => submitPassword(slot, password)} onPasswordCancel={() => cancelPassword(slot)}
         onTerm={(value, selection) => addTerms([value], { slot, selection })}
         onViewChange={(documentId, page) => { const view = { documentId, page }; viewsRef.current[slot] = view; channel.current?.postMessage({ type: 'view', slot, view }) }}
-        onTolerant={value => { const next = tolerant.map((item, index) => index === slot ? value : item); setTolerant(next); broadcast({ ...stateRef.current, tolerant: next }) }} />)}
+        onTolerant={value => { const next = tolerant.map((item, index) => index === slot ? value : item); setTolerant(next); broadcast({ ...stateRef.current, tolerant: next }) }} /></Fragment>)}
+      {visibleSlots.length === 2 && ([0, 1] as const).map(slot => {
+        const visible = activeCollapsed === slot
+        const isStartEdge = slot === firstSlot
+        const label = `展开文档 ${slot === 0 ? 'A' : 'B'}`
+        return <button key={`expand-${slot}`} type="button"
+          className={`pane-collapse-tab ${isStartEdge ? 'edge-start' : 'edge-end'} ${visible ? 'is-visible' : ''}`}
+          aria-label={label} title={`${label}（点击展开或向内拖动）`} inert={!visible || undefined}
+          onPointerDown={event => startDividerDrag(event, slot)} onPointerMove={moveDivider} onPointerUp={stopDividerDrag} onPointerCancel={stopDividerDrag}
+          onClick={() => { if (suppressTabClickRef.current) { suppressTabClickRef.current = false; return } changeCollapsed(null) }}>
+          <svg className="collapse-triangle" width="11" height="12" viewBox="0 0 12 14" aria-hidden="true">
+            <path d="M9.5 2.2L2.5 7L9.5 11.8Z" fill="currentColor" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+          </svg>
+        </button>
+      })}
     </div></div>
+    {settingsOpen && <div className="modal-backdrop" onClick={() => setSettingsOpen(false)}>
+      <div className="settings-modal" role="dialog" aria-modal="true" aria-label="偏好设置" onClick={event => event.stopPropagation()}>
+        <header className="modal-header">
+          <div><h2>偏好设置</h2><span>定制外观主题、看图体验与系统右键打开行为</span></div>
+          <button className="icon-button" aria-label="关闭设置" onClick={() => setSettingsOpen(false)}><X size={17} /></button>
+        </header>
+        <div className="modal-body">
+          <section className="setting-section">
+            <h3>外观主题</h3>
+            <div className="theme-options" role="radiogroup" aria-label="外观主题">
+              {([
+                ['light', '浅色清爽', Sun],
+                ['dark', '暗黑 CAD', Moon],
+                ['system', '跟随系统', Monitor],
+              ] as const).map(([value, label, Icon]) => (
+                <button key={value} type="button" role="radio" aria-checked={settings.theme === value}
+                  className={`theme-card ${settings.theme === value ? 'is-active' : ''}`}
+                  onClick={() => updateSettings({ theme: value })}>
+                  <Icon size={16} /><span>{label}</span>
+                </button>
+              ))}
+            </div>
+          </section>
+          <section className="setting-section">
+            <h3>看图与高亮偏好</h3>
+            <div className="setting-row">
+              <div><strong>聚光灯遮罩浓度</strong><span>调节 PADS 聚光灯模式下非命中区域的变暗程度</span></div>
+              <div className="slider-control">
+                <input type="range" aria-label="聚光灯遮罩浓度" min={25} max={85} step={1}
+                  value={Math.round(settings.dimOpacity * 100)}
+                  onChange={event => updateSettings({ dimOpacity: Number(event.target.value) / 100 })} />
+                <span>{Math.round(settings.dimOpacity * 100)}%</span>
+              </div>
+            </div>
+            <label className="setting-toggle">
+              <div><strong>默认开启 PADS 聚光灯模式</strong><span>启动应用时默认使用聚光灯高亮</span></div>
+              <input type="checkbox" checked={settings.defaultDim} onChange={event => {
+                const checked = event.target.checked
+                updateSettings({ defaultDim: checked })
+                setDim(checked); broadcast({ ...stateRef.current, dim: checked })
+              }} />
+            </label>
+            <label className="setting-toggle">
+              <div><strong>默认开启强制容错匹配</strong><span>启动时对 A / B 面板默认勾选子串容错</span></div>
+              <input type="checkbox" checked={settings.defaultTolerant} onChange={event => {
+                const checked = event.target.checked
+                updateSettings({ defaultTolerant: checked })
+                const next = [checked, checked]
+                setTolerant(next); broadcast({ ...stateRef.current, tolerant: next })
+              }} />
+            </label>
+            <label className="setting-toggle">
+              <div><strong>打开 PDF 时自动整页适配</strong><span>加载新图纸后自动缩放到完整显示第 1 页</span></div>
+              <input type="checkbox" checked={settings.autoFitOnLoad} onChange={event => updateSettings({ autoFitOnLoad: event.target.checked })} />
+            </label>
+            <label className="setting-toggle">
+              <div><strong>记忆分屏布局与比例</strong><span>下次启动时自动恢复上次的分屏方向与拖拽比例</span></div>
+              <input type="checkbox" checked={settings.rememberLayout} onChange={event => updateSettings({ rememberLayout: event.target.checked, savedVertical: vertical, savedSplits: splitSizes })} />
+            </label>
+          </section>
+          <section className="setting-section">
+            <h3>外部打开与系统右键集成</h3>
+            <div className="setting-row setting-column">
+              <div><strong>从资源管理器打开 PDF 时的面板分配策略</strong><span>控制双击或右键直接打开 PDF 文件时的默认载入位置</span></div>
+              <select aria-label="外部打开面板分配策略" value={settings.externalOpenPolicy}
+                onChange={event => updateSettings({ externalOpenPolicy: event.target.value as ExternalOpenPolicy })}>
+                <option value="single-a-dual-ab">单文件进 A，双文件同时进 A + B（默认）</option>
+                <option value="smart-a-then-b">智能顺延（A 空进 A，A 已有则自动进 B）</option>
+                <option value="ask">每次弹窗询问放入文档 A 还是文档 B</option>
+              </select>
+            </div>
+            {shellStatus?.supported && <div className="shell-integration-card">
+              <div className="shell-info">
+                <strong><ExternalLink size={15} />Windows 右键菜单与「打开方式」关联</strong>
+                <span>无需管理员权限，一键注册到当前用户的 PDF 右键菜单（支持直接打开 / 作为 A 图打开 / 作为 B 图打开）及系统「打开方式」列表。</span>
+              </div>
+              <div className="shell-actions">
+                <span className={`shell-status-badge ${shellStatus.enabled ? 'is-enabled' : ''}`}>
+                  {shellStatus.enabled ? <><Check size={13} />已启用系统右键关联</> : '未注册系统关联'}
+                </span>
+                <button type="button" className={shellStatus.enabled ? 'command' : 'search-command'} disabled={shellBusy}
+                  onClick={() => void toggleShellIntegration(!shellStatus.enabled)}>
+                  {shellStatus.enabled ? '取消右键与关联' : '注册右键与打开方式'}
+                </button>
+              </div>
+            </div>}
+          </section>
+          <section className="setting-section shortcut-section">
+            <h3>全局快捷键</h3>
+            <div className="shortcut-grid">
+              <div><kbd>Ctrl + F</kbd><span>聚焦关键词搜索框</span></div>
+              <div><kbd>F3 / Shift+F3</kbd><span>下一处 / 上一处命中</span></div>
+              <div><kbd>R</kbd><span>旋转当前活动图纸 90°</span></div>
+              <div><kbd>Ctrl + 滚轮</kbd><span>以鼠标为中心缩放图纸</span></div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>}
+    {pendingExternalFile && <div className="modal-backdrop" onClick={() => setPendingExternalFile(null)}>
+      <div className="settings-modal ask-slot-modal" role="dialog" aria-modal="true" aria-label="选择打开面板" onClick={event => event.stopPropagation()}>
+        <header className="modal-header">
+          <div><h2>选择要载入的面板</h2><span>{pendingExternalFile.name}</span></div>
+          <button className="icon-button" aria-label="取消外部打开" onClick={() => setPendingExternalFile(null)}><X size={17} /></button>
+        </header>
+        <div className="ask-slot-actions">
+          <button type="button" className="search-command" onClick={() => {
+            const file = pendingExternalFile; setPendingExternalFile(null)
+            if (collapsedPane === 0) changeCollapsed(null)
+            void loadBytesToSlot(0, file.name, file.bytes)
+          }}>载入到文档 A（原理图）</button>
+          <button type="button" className="command" onClick={() => {
+            const file = pendingExternalFile; setPendingExternalFile(null)
+            if (collapsedPane === 1) changeCollapsed(null)
+            void loadBytesToSlot(1, file.name, file.bytes)
+          }}>载入到文档 B（位号 / 丝印）</button>
+        </div>
+      </div>
+    </div>}
   </main>
 }
 export default App

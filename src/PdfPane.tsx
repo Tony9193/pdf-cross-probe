@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { TextLayer } from 'pdfjs-dist'
 import type { PDFPageProxy, RenderTask } from 'pdfjs-dist'
-import { ChevronLeft, ChevronRight, FilePlus2, Hand, Lock, MousePointer2, Scan, ZoomIn, ZoomOut } from 'lucide-react'
+import { ChevronLeft, ChevronRight, FilePlus2, Hand, Lock, MousePointer2, RotateCw, Scan, ZoomIn, ZoomOut } from 'lucide-react'
 import { indexPage } from './pdf'
 import type { DocumentSession, PageIndex } from './pdf'
 import { keywordAt } from './search'
@@ -15,28 +15,48 @@ export type TextSelection = { page: number; start: number; length: number }
 type Rectangle = { left: number; top: number; width: number; height: number; term: string; color: string; start: number; length: number }
 const maxScale = 32
 const detailPixelBudget = 6000000
+const maxCachedTextDivs = 30000
 type PreparedPage = {
   key: string; index: PageIndex; divs: HTMLElement[]; buffer: HTMLCanvasElement
   layer: HTMLDivElement; width: number; height: number; page: PDFPageProxy; error: string; textReady: boolean
   precision?: { buffer: HTMLCanvasElement; left: number; top: number; width: number; height: number; scale: number }
 }
 
-function preparePage(session: DocumentSession, pageNumber: number, onPreview?: (preview: PreparedPage) => void) {
+function scheduleIdle(callback: () => void): { type: 'idle' | 'timeout'; handle: number } {
+  if ('requestIdleCallback' in window) {
+    return { type: 'idle', handle: window.requestIdleCallback(callback, { timeout: 1000 }) }
+  }
+  return { type: 'timeout', handle: globalThis.setTimeout(callback, 50) }
+}
+
+function cancelIdle(task: { type: 'idle' | 'timeout'; handle: number } | null) {
+  if (!task) return
+  if (task.type === 'idle' && 'cancelIdleCallback' in window) window.cancelIdleCallback(task.handle)
+  else globalThis.clearTimeout(task.handle)
+}
+
+function preparePage(session: DocumentSession, pageNumber: number, rotation = 0, onPreview?: (preview: PreparedPage) => void, maxItems?: number) {
   let cancelled = false, finished = false
   let renderTask: RenderTask | undefined
   let textLayer: TextLayer | undefined
+  const pageKey = `${session.id}:${pageNumber}:${rotation}`
   const promise = (async (): Promise<PreparedPage> => {
     const page = await session.pdf.getPage(pageNumber)
     if (cancelled) throw new Error('Page preparation cancelled')
-    const viewport = page.getViewport({ scale: 1 })
+    const content = await page.getTextContent({ disableNormalization: true })
+    if (cancelled) throw new Error('Page preparation cancelled')
+    if (maxItems !== undefined) {
+      const textItemCount = content.items.reduce((count, item) => count + ('str' in item ? 1 : 0), 0)
+      if (textItemCount > maxItems) throw new Error('Prefetch skipped: exceeds text layer cache budget')
+    }
+    const effectiveRotation = (page.rotate + rotation) % 360
+    const viewport = page.getViewport({ scale: 1, rotation: effectiveRotation })
     const ratio = Math.min(1, Math.sqrt(2000000 / (viewport.width * viewport.height)))
     const buffer = document.createElement('canvas')
     buffer.width = Math.max(1, Math.floor(viewport.width * ratio))
     buffer.height = Math.max(1, Math.floor(viewport.height * ratio))
     const stagingLayer = document.createElement('div')
     stagingLayer.className = 'textLayer'
-    const content = await page.getTextContent({ disableNormalization: true })
-    if (cancelled) throw new Error('Page preparation cancelled')
     const fontHeights = content.items.flatMap(item => 'str' in item && item.str.trim() ? [Math.hypot(item.transform[2], item.transform[3])] : []).filter(height => height > 0)
     const smallestFont = fontHeights.reduce((smallest, height) => Math.min(smallest, height), 16)
     // 先放大文字层再整体缩回页面尺寸，降低极小文字布局的精度损失。
@@ -51,12 +71,12 @@ function preparePage(session: DocumentSession, pageNumber: number, onPreview?: (
     if (onPreview) {
       const emptyLayer = document.createElement('div')
       emptyLayer.className = 'textLayer'
-      onPreview({ key: `${session.id}:${pageNumber}`, index: { text: '', segments: [] }, divs: [], buffer,
+      onPreview({ key: pageKey, index: { text: '', segments: [] }, divs: [], buffer,
         layer: emptyLayer, width: viewport.width, height: viewport.height, page, error: '', textReady: false })
       await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
       if (cancelled) throw new Error('Page preparation cancelled')
     }
-    textLayer = new TextLayer({ textContentSource: content, container: stagingLayer, viewport: page.getViewport({ scale: textScale }) })
+    textLayer = new TextLayer({ textContentSource: content, container: stagingLayer, viewport: page.getViewport({ scale: textScale, rotation: effectiveRotation }) })
     await Promise.all([renderTask.promise, textLayer.render()])
     if (cancelled) throw new Error('Page preparation cancelled')
     stagingLayer.style.width = `${viewport.width * textScale}px`
@@ -68,7 +88,7 @@ function preparePage(session: DocumentSession, pageNumber: number, onPreview?: (
     const error = aligned ? '' : '文字索引与文字层不一致，本页仅查看，已停止高亮以避免错位'
     if (!aligned) stagingLayer.replaceChildren()
     finished = true
-    return { key: `${session.id}:${pageNumber}`, index: aligned ? index : { text: '', segments: [] }, divs: aligned ? textLayer.textDivs : [],
+    return { key: pageKey, index: aligned ? index : { text: '', segments: [] }, divs: aligned ? textLayer.textDivs : [],
       buffer, layer: stagingLayer, width: viewport.width, height: viewport.height, page, error, textReady: true }
   })()
   return { promise, cancel() { if (!finished) { cancelled = true; renderTask?.cancel(); textLayer?.cancel() } } }
@@ -76,9 +96,12 @@ function preparePage(session: DocumentSession, pageNumber: number, onPreview?: (
 
 type Props = {
   slot: number; session: DocumentSession | null; error: string; loading: boolean
+  collapsed?: boolean; transitioning?: boolean
+  dimOpacity?: number; autoFitOnLoad?: boolean; rotationTrigger?: number
   passwordPrompt?: PasswordPrompt | null
   matches: ColoredMatch[]; navigation: Navigation | null; dim: boolean; tolerant: boolean; samples: string[]
   onFile: (file: File) => void; onSample: (name: string) => void
+  onActivate?: () => void
   onPasswordSubmit?: (password: string) => void; onPasswordCancel?: () => void
   onTerm: (term: string, selection: TextSelection) => void; onTolerant: (value: boolean) => void
   onViewChange?: (documentId: string, page: number) => void
@@ -88,10 +111,12 @@ export default function PdfPane(props: Props) {
   const { slot, session, matches, navigation, dim } = props
   const [pageNumber, setPageNumber] = useState(1)
   const [scale, setScale] = useState(1)
+  const [rotation, setRotation] = useState(0)
   const [rectangles, setRectangles] = useState<Rectangle[]>([])
   const [rendered, setRendered] = useState<PreparedPage | null>(null)
   const [password, setPassword] = useState('')
   const pageCache = useRef(new Map<string, PreparedPage>())
+  const oversizedPrefetchKeys = useRef(new Set<string>())
   const backgroundJobs = useRef(new Set<ReturnType<typeof preparePage>>())
   const committedPage = useRef<PreparedPage | null>(null)
   const activeKey = useRef('')
@@ -121,6 +146,10 @@ export default function PdfPane(props: Props) {
   const zoomAnchor = useRef<{ x: number; y: number; screenX: number; screenY: number } | null>(null)
   const panStart = useRef<{ pointerId: number; x: number; y: number; left: number; top: number } | null>(null)
   const suppressClick = useRef(false)
+  const wasCollapsed = useRef(Boolean(props.collapsed))
+  const expandingUntil = useRef(0)
+  if (wasCollapsed.current && !props.collapsed) expandingUntil.current = performance.now() + 360
+  wasCollapsed.current = Boolean(props.collapsed)
 
   useEffect(() => {
     for (const job of backgroundJobs.current) job.cancel()
@@ -129,13 +158,24 @@ export default function PdfPane(props: Props) {
       entry.buffer.width = 0; entry.buffer.height = 0; entry.layer.replaceChildren()
       if (entry.precision) { entry.precision.buffer.width = 0; entry.precision.buffer.height = 0 }
     }
-    pageCache.current.clear(); committedPage.current = null
-    setPageNumber(1); setScale(1); setRectangles([]); setRendered(null)
+    pageCache.current.clear(); oversizedPrefetchKeys.current.clear()
+    committedPage.current = null; committedKey.current = ''; committedBuffer.current = null
+    detailRegion.current = null; displayedScale.current = 1
+    if (canvasRef.current) { canvasRef.current.width = 0; canvasRef.current.height = 0 }
+    if (detailRef.current) { detailRef.current.width = 0; detailRef.current.height = 0; detailRef.current.style.display = 'none' }
+    layerRef.current?.replaceChildren()
+    setPageNumber(1); setScale(1); setRotation(0); setRectangles([]); setRendered(null)
     setBusy(false); setDetailBusy(false); setRenderError(''); setPanning(false)
     panStart.current = null; pointerStart.current = null; zoomAnchor.current = null
     lastNavigation.current = ''
     scrollRef.current?.scrollTo(0, 0)
+    if (session && props.autoFitOnLoad) void fitPage(1, 0)
   }, [session?.id])
+
+  useEffect(() => {
+    if (!props.rotationTrigger || !session) return
+    setRotation(value => (value + 90) % 360)
+  }, [props.rotationTrigger])
 
   useEffect(() => {
     if (navigation && navigation.documentId === session?.id) setPageNumber(navigation.match.page)
@@ -150,16 +190,17 @@ export default function PdfPane(props: Props) {
     if (props.passwordPrompt) passwordRef.current?.focus()
   }, [props.passwordPrompt?.id, props.passwordPrompt?.attempts])
 
-  const renderKey = `${session?.id}:${pageNumber}`
+  const renderKey = `${session?.id}:${pageNumber}:${rotation}`
   activeKey.current = renderKey
 
   function cachePage(entry: PreparedPage) {
     const cache = pageCache.current
     cache.delete(entry.key); cache.set(entry.key, entry)
-    const overBudget = () => cache.size > 3 || [...cache.values()].reduce((total, item) => total + item.buffer.width * item.buffer.height, 0) > 6000000 || [...cache.values()].reduce((total, item) => total + item.divs.length, 0) > 30000
+    const overBudget = () => cache.size > 3 || [...cache.values()].reduce((total, item) => total + item.buffer.width * item.buffer.height, 0) > 6000000 || [...cache.values()].reduce((total, item) => total + item.divs.length, 0) > maxCachedTextDivs
     while (overBudget()) {
       const victim = [...cache.keys()].find(key => key !== activeKey.current && key !== committedKey.current)
       if (!victim) break
+      if (victim === entry.key) oversizedPrefetchKeys.current.add(entry.key)
       const removed = cache.get(victim)!
       cache.delete(victim)
       removed.buffer.width = 0; removed.buffer.height = 0; removed.layer.replaceChildren()
@@ -183,43 +224,49 @@ export default function PdfPane(props: Props) {
       return
     }
     setBusy(true); setRenderError('')
-    const job = preparePage(session, pageNumber, preview => { if (!cancelled) setRendered(preview) })
+    const job = preparePage(session, pageNumber, rotation, preview => { if (!cancelled) setRendered(preview) })
     void job.promise.then(entry => {
       if (cancelled) return
       cachePage(entry); setRendered(entry); setRenderError(entry.error)
     }).catch(error => { if (!cancelled) setRenderError(error instanceof Error ? error.message : String(error)) })
       .finally(() => { if (!cancelled) setBusy(false) })
     return () => { cancelled = true; job.cancel() }
-  }, [session?.id, pageNumber, renderKey])
+  }, [session?.id, pageNumber, rotation, renderKey])
 
   useEffect(() => {
-    if (!session || busy || detailBusy || rendered?.key !== renderKey) return
-    let cancelled = false, idle = 0
+    if (!session || busy || detailBusy || rendered?.key !== renderKey || !rendered.textReady) return
+    let cancelled = false
+    let idle: { type: 'idle' | 'timeout'; handle: number } | null = null
     const timer = window.setTimeout(() => {
-      idle = window.requestIdleCallback(() => {
+      idle = scheduleIdle(() => {
         void (async () => {
           for (const adjacent of [pageNumber + 1, pageNumber - 1]) {
             if (cancelled || adjacent < 1 || adjacent > session.pdf.numPages) continue
-            const key = `${session.id}:${adjacent}`
+            const key = `${session.id}:${adjacent}:${rotation}`
+            if (oversizedPrefetchKeys.current.has(key)) continue
             const cached = pageCache.current.get(key)
             if (cached) { cachePage(cached); continue }
-            const job = preparePage(session, adjacent)
+            const remainingDivBudget = maxCachedTextDivs - rendered.divs.length
+            if (remainingDivBudget <= 0) break
+            const job = preparePage(session, adjacent, rotation, undefined, remainingDivBudget)
             backgroundJobs.current.add(job)
             try {
               const entry = await job.promise
               if (!cancelled) cachePage(entry)
-            } catch { if (cancelled) break }
-            finally { backgroundJobs.current.delete(job) }
+            } catch (error) {
+              if (error instanceof Error && error.message.startsWith('Prefetch skipped:')) oversizedPrefetchKeys.current.add(key)
+              if (cancelled) break
+            } finally { backgroundJobs.current.delete(job) }
           }
         })()
-      }, { timeout: 1000 })
+      })
     }, 350)
     return () => {
-      cancelled = true; clearTimeout(timer); if (idle) window.cancelIdleCallback(idle)
+      cancelled = true; clearTimeout(timer); cancelIdle(idle)
       for (const job of backgroundJobs.current) job.cancel()
       backgroundJobs.current.clear()
     }
-  }, [session?.id, rendered, pageNumber, renderKey, busy, detailBusy])
+  }, [session?.id, rendered, pageNumber, rotation, renderKey, busy, detailBusy])
 
   useLayoutEffect(() => {
     if (!rendered || rendered.key !== renderKey || !paperRef.current) return
@@ -255,6 +302,8 @@ export default function PdfPane(props: Props) {
     const textScale = Number.parseFloat(layer.style.getPropertyValue('--total-scale-factor')) || 1
     layer.style.width = `${rendered.width * textScale}px`
     layer.style.height = `${rendered.height * textScale}px`
+    layer.style.transform = `scale(${scale / textScale})`
+    layer.style.transformOrigin = '0 0'
     const paddingLeft = Number.parseFloat(getComputedStyle(scroll).paddingLeft)
     const paddingTop = Number.parseFloat(getComputedStyle(scroll).paddingTop)
     const anchor = zoomAnchor.current
@@ -305,17 +354,23 @@ export default function PdfPane(props: Props) {
       }
     }
     setRectangles(next)
+  }, [rendered, matches, pageNumber, renderKey, scale])
+
+  useLayoutEffect(() => {
     if (!navigation || navigation.documentId !== session?.id || navigation.match.page !== pageNumber || lastNavigation.current === navigation.id) return
-    const target = next.find(rect => rect.start === navigation.match.start && rect.length === navigation.match.length && rect.term === navigation.term)
     if (navigation.preservePosition) { lastNavigation.current = navigation.id; return }
-    if (target && scrollRef.current) {
-      scrollRef.current.scrollTo({
-        left: Math.max(0, target.left + target.width / 2 + paddingLeft - scrollRef.current.clientWidth / 2),
-        top: Math.max(0, target.top + target.height / 2 + paddingTop - scrollRef.current.clientHeight / 2), behavior: 'instant',
-      })
-      lastNavigation.current = navigation.id
-    }
-  }, [rendered, matches, navigation, pageNumber, renderKey, session?.id, scale])
+    const scroll = scrollRef.current
+    if (props.collapsed || !scroll || scroll.clientWidth < 1 || scroll.clientHeight < 1) return
+    const target = rectangles.find(rect => rect.start === navigation.match.start && rect.length === navigation.match.length && rect.term === navigation.term)
+    if (!target) return
+    const paddingLeft = Number.parseFloat(getComputedStyle(scroll).paddingLeft)
+    const paddingTop = Number.parseFloat(getComputedStyle(scroll).paddingTop)
+    scroll.scrollTo({
+      left: Math.max(0, target.left + target.width / 2 + paddingLeft - scroll.clientWidth / 2),
+      top: Math.max(0, target.top + target.height / 2 + paddingTop - scroll.clientHeight / 2), behavior: 'instant',
+    })
+    if (performance.now() >= expandingUntil.current) lastNavigation.current = navigation.id
+  }, [rectangles, navigation, pageNumber, session?.id, props.collapsed, viewRevision])
 
   useEffect(() => {
     const scroll = scrollRef.current
@@ -385,7 +440,8 @@ export default function PdfPane(props: Props) {
         const ratio = Math.min(window.devicePixelRatio || 1, 2, Math.sqrt(detailPixelBudget / (width * height)))
         const buffer = document.createElement('canvas')
         buffer.width = Math.max(1, Math.floor(width * ratio)); buffer.height = Math.max(1, Math.floor(height * ratio))
-        task = rendered.page.render({ canvas: buffer, viewport: rendered.page.getViewport({ scale }),
+        const effectiveRotation = (rendered.page.rotate + rotation) % 360
+        task = rendered.page.render({ canvas: buffer, viewport: rendered.page.getViewport({ scale, rotation: effectiveRotation }),
           transform: [ratio, 0, 0, ratio, -left * ratio, -top * ratio], background: '#ffffff' })
         await task.promise
         if (cancelled || requestedScale.current !== scale) return
@@ -417,16 +473,21 @@ export default function PdfPane(props: Props) {
     return () => { cancelled = true; clearTimeout(timer); task?.cancel() }
   }, [rendered, renderKey, scale, viewRevision])
 
-  async function fitPage() {
+  async function fitPage(targetPage = pageNumber, targetRotation = rotation) {
     if (!session || !scrollRef.current) return
-    const viewport = (await session.pdf.getPage(pageNumber)).getViewport({ scale: 1 })
-    setScale(Math.max(0.1, Math.min(maxScale, (scrollRef.current.clientWidth - 48) / viewport.width,
-      (scrollRef.current.clientHeight - 48) / viewport.height)))
+    const scroll = scrollRef.current
+    const style = getComputedStyle(scroll)
+    const padX = (Number.parseFloat(style.paddingLeft) || 0) + (Number.parseFloat(style.paddingRight) || 0)
+    const padY = (Number.parseFloat(style.paddingTop) || 0) + (Number.parseFloat(style.paddingBottom) || 0)
+    const page = await session.pdf.getPage(targetPage)
+    const viewport = page.getViewport({ scale: 1, rotation: (page.rotate + targetRotation) % 360 })
+    setScale(Math.max(0.1, Math.min(maxScale, Math.max(1, scroll.clientWidth - padX) / viewport.width,
+      Math.max(1, scroll.clientHeight - padY) / viewport.height)))
   }
 
   function clickText(event: React.MouseEvent) {
     const start = pointerStart.current
-    if (suppressClick.current || handTool || !start || Math.hypot(event.clientX - start.x, event.clientY - start.y) > 5 || !rendered || rendered.key !== renderKey) return
+    if (event.detail > 1 || suppressClick.current || handTool || !start || Math.hypot(event.clientX - start.x, event.clientY - start.y) > 5 || !rendered || rendered.key !== renderKey) return
     if (window.getSelection()?.toString()) return
     const target = (event.target as HTMLElement).closest('span')
     const segmentIndex = rendered.divs.findIndex(div => div === target)
@@ -466,7 +527,9 @@ export default function PdfPane(props: Props) {
     }
   }
 
-  return <section className={`pdf-pane ${dragging ? 'drop-active' : ''}`} data-slot={slot}
+  return <section className={`pdf-pane ${dragging ? 'drop-active' : ''} ${props.collapsed ? 'is-collapsed' : ''} ${props.transitioning ? 'is-transitioning' : ''}`}
+    data-slot={slot} data-rotation={rotation} inert={props.collapsed || undefined}
+    onPointerDownCapture={() => props.onActivate?.()}
     onDragOver={event => { event.preventDefault(); setDragging(true) }}
     onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragging(false) }}
     onDrop={event => { event.preventDefault(); setDragging(false); const file = event.dataTransfer.files[0]; if (file) props.onFile(file) }}>
@@ -479,7 +542,7 @@ export default function PdfPane(props: Props) {
     </header>
     <div className="pane-toolbar">
       <button title="上一页" disabled={!session || pageNumber <= 1} onClick={() => setPageNumber(value => value - 1)}><ChevronLeft size={17} /></button>
-      <input aria-label={`文档 ${slot === 0 ? 'A' : 'B'} 页码`} type="number" min={1} max={session?.pdf.numPages ?? 1} value={pageNumber}
+      <input aria-label={`文档 ${slot === 0 ? 'A' : 'B'} 页码`} type="number" min={1} max={session?.pdf.numPages ?? 1} disabled={!session} value={pageNumber}
         onChange={event => setPageNumber(Math.max(1, Math.min(session?.pdf.numPages ?? 1, Number(event.target.value) || 1)))} />
       <span>/ {session?.pdf.numPages ?? 0}</span>
       <button title="下一页" disabled={!session || pageNumber >= session.pdf.numPages} onClick={() => setPageNumber(value => value + 1)}><ChevronRight size={17} /></button><i />
@@ -488,6 +551,7 @@ export default function PdfPane(props: Props) {
         value={Math.round(scale * 100)} onChange={event => setScale(Math.max(0.1, Math.min(maxScale, (Number(event.target.value) || 10) / 100)))} /><span>%</span>
       <button title="放大" disabled={!session || scale >= maxScale} onClick={() => setScale(value => Math.min(maxScale, value * 1.25))}><ZoomIn size={17} /></button>
       <button title="整页适配" disabled={!session} onClick={() => void fitPage()}><Scan size={17} /></button>
+      <button title="顺时针旋转 90°" disabled={!session} onClick={() => setRotation(value => (value + 90) % 360)}><RotateCw size={17} /></button>
       <button title={handTool ? '文字选择' : '抓手平移'} aria-pressed={handTool} onClick={() => setHandTool(value => !value)}>{handTool ? <MousePointer2 size={17} /> : <Hand size={17} />}</button>
       <label className="tolerance"><input type="checkbox" checked={props.tolerant} onChange={event => props.onTolerant(event.target.checked)} />强制容错</label>
     </div>
@@ -540,13 +604,13 @@ export default function PdfPane(props: Props) {
         <div className="paper" ref={paperRef} data-page={pageNumber}>
           <div className="page-content" ref={contentRef}>
             <canvas ref={canvasRef} className="base-canvas" />
-            <div ref={layerRef} className="textLayer" onPointerDown={event => { pointerStart.current = { x: event.clientX, y: event.clientY } }} onClick={clickText} />
           </div>
           <canvas ref={detailRef} className="detail-canvas" style={{ display: 'none' }} />
+          <div ref={layerRef} className="textLayer" onPointerDown={event => { pointerStart.current = { x: event.clientX, y: event.clientY } }} onClick={clickText} />
           {dim && rectangles.length > 0 && <svg className="dim-layer" width="100%" height="100%">
             <defs><mask id={`mask-${slot}`}><rect width="100%" height="100%" fill="white" />
               {rectangles.map((rect, index) => <rect key={index} x={rect.left - 2} y={rect.top - 2} width={rect.width + 4} height={rect.height + 4} fill="black" />)}
-            </mask></defs><rect width="100%" height="100%" fill="rgba(0,0,0,.62)" mask={`url(#mask-${slot})`} />
+            </mask></defs><rect width="100%" height="100%" fill={`rgba(0,0,0,${props.dimOpacity ?? 0.62})`} mask={`url(#mask-${slot})`} />
           </svg>}
           <div className="highlight-layer">{rectangles.map((rect, index) => <div key={index} data-term={rect.term}
             data-start={rect.start} data-length={rect.length} className={`hit-rectangle ${navigation?.match.page === pageNumber && navigation?.match.start === rect.start && navigation?.match.length === rect.length && navigation?.term === rect.term ? 'current-hit' : ''}`} style={{ left: rect.left, top: rect.top, width: rect.width, height: rect.height, borderColor: rect.color, background: `${rect.color}30` }} />)}</div>
