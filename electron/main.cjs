@@ -18,6 +18,7 @@ const contentTypes = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascr
   '.json': 'application/json', '.bcmap': 'application/octet-stream', '.ttf': 'font/ttf', '.pfb': 'application/octet-stream' }
 const csp = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data: blob:; worker-src 'self' blob:; connect-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
 let closing = false
+let updateCleanupComplete = false
 let lastFocusedMainWindow
 let updater
 let nextWorkspaceNumber = 1
@@ -582,10 +583,17 @@ app.whenReady().then(async () => {
   await enqueueLaunchFiles(startupArgs, process.cwd(), window)
 }).catch(error => { if (!closing) { console.error(error); dialog.showErrorBox('PDF Cross Probe', String(error)) } app.quit() })
 
-app.on('before-quit', () => {
+app.on('before-quit', event => {
+  const alreadyClosing = closing
   closing = true
   externalOpenQueue.length = 0
   activeExternalOpen = null
-  if (updater?.getStatus().phase !== 'installing') updater?.cancel()
+  if (!updater || updater.getStatus().phase === 'installing' || updateCleanupComplete) return
+  event.preventDefault()
+  if (alreadyClosing) return
+  void updater.dispose().catch(() => {}).finally(() => {
+    updateCleanupComplete = true
+    app.quit()
+  })
 })
 app.on('window-all-closed', () => app.quit())

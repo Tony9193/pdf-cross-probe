@@ -1053,7 +1053,7 @@ test('settings dialog, theme switch, sidebar collapse, pane swap, 90deg rotation
   assert.equal(await dialog.count(), 0)
 })
 
-test('external open selector handles legacy settings migration, replacement confirmation, races and mobile layout', { timeout: 60000 }, async () => {
+test('external open selector handles legacy settings migration, replacement confirmation, races, mobile layout and collapsed replacements', { timeout: 60000 }, async () => {
   const custom = await browser.newContext({ viewport: { width: 1280, height: 900 } })
   const tab = await custom.newPage()
   try {
@@ -1065,6 +1065,7 @@ test('external open selector handles legacy settings migration, replacement conf
       }))
       window.__resolvedDecisions = []
       window.__externalListeners = []
+      window.__launchListeners = []
       window.__currentExternalRequest = {
         requestId: 'req-1',
         token: 'tok-1',
@@ -1106,7 +1107,10 @@ test('external open selector handles legacy settings migration, replacement conf
         openUpdatePage: async () => {},
         onUpdateStatus: () => () => {},
         consumeLaunchQueue: async () => [],
-        onLaunchFiles: () => () => {},
+        onLaunchFiles: callback => {
+          window.__launchListeners.push(callback)
+          return () => { window.__launchListeners = window.__launchListeners.filter(listener => listener !== callback) }
+        },
         reportWorkspaceState: async () => {},
         getExternalOpenRequest: async () => window.__currentExternalRequest,
         resolveExternalOpen: async decision => {
@@ -1177,6 +1181,28 @@ test('external open selector handles legacy settings migration, replacement conf
       slot: 1,
       target: { sessionId: 'ws-1', expectedSlotIds: ['doc-1a-new', ''] },
     })
+
+    await upload(tab, 0)
+    await upload(tab, 1)
+    const names = ['drawing 0.pdf', 'drawing 1.pdf']
+    for (const slot of [1, 0]) {
+      const divider = await tab.getByRole('separator', { name: '调整文档面板大小' }).boundingBox()
+      const panes = await tab.locator('.panes').boundingBox()
+      await tab.mouse.move(divider.x + divider.width / 2, divider.y + divider.height / 2)
+      await tab.mouse.down()
+      await tab.mouse.move(panes.x + (slot === 0 ? 8 : panes.width - 8), divider.y + divider.height / 2, { steps: 10 })
+      await tab.mouse.up()
+      await tab.waitForFunction(target => document.querySelector(`[data-slot="${target}"]`).getBoundingClientRect().width === 0, slot)
+      names[slot] = `replacement-${slot}.pdf`
+      await tab.evaluate(({ target, name, bytes }) => {
+        for (const listener of window.__launchListeners) listener({ targetSlot: target, files: [{ name, bytes: new Uint8Array(bytes) }] })
+      }, { target: slot, name: names[slot], bytes: [...replacement] })
+      await tab.waitForFunction(({ target, name }) => document.querySelector(`[data-slot="${target}"] .pane-header strong`)?.textContent === name &&
+        document.querySelector(`[data-slot="${target}"] .pane-status`)?.textContent?.includes('文字索引完成'), { target: slot, name: names[slot] })
+      await tab.waitForFunction(target => document.querySelector(`[data-slot="${target}"]`).getBoundingClientRect().width > 100, slot, { timeout: 5000 })
+      assert.equal(await tab.locator(`[data-slot="${1 - slot}"] .pane-header strong`).textContent(), names[1 - slot])
+    }
+    assert.equal(await tab.evaluate(() => window.__launchListeners.length), 1)
   } finally {
     await custom.close()
   }

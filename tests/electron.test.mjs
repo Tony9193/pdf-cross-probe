@@ -398,6 +398,24 @@ test('relaunch creates independent blank windows and external PDF launches route
     assert.equal(await pairedWorkspace.locator('[data-slot="0"] .pane-header strong').textContent(), 'proj1-sch.pdf')
     assert.equal(await pairedWorkspace.locator('[data-slot="1"] .pane-header strong').textContent(), 'proj1-pcb.pdf')
 
+    await workspace2.bringToFront()
+    const collapsedDivider = await workspace2.getByRole('separator', { name: '调整文档面板大小' }).boundingBox()
+    const workspaceBounds = await workspace2.locator('.panes').boundingBox()
+    await workspace2.mouse.move(collapsedDivider.x + collapsedDivider.width / 2, collapsedDivider.y + collapsedDivider.height / 2)
+    await workspace2.mouse.down()
+    await workspace2.mouse.move(workspaceBounds.x + workspaceBounds.width - 8, collapsedDivider.y + collapsedDivider.height / 2, { steps: 10 })
+    await workspace2.mouse.up()
+    await workspace2.waitForFunction(() => document.querySelector('[data-slot="1"]').getBoundingClientRect().width === 0)
+    assert.equal(spawnSync(runningExecutable, [...args, replaceSch], { env, timeout: 30000, windowsHide: true }).status, 0)
+    const collapsedReplacement = workspace2.getByRole('dialog', { name: '选择打开位置' })
+    await collapsedReplacement.waitFor({ timeout: 15000 })
+    await collapsedReplacement.getByRole('button', { name: '工作区 2 替换 B', exact: true }).click()
+    await collapsedReplacement.getByRole('button', { name: '确认替换', exact: true }).click()
+    await workspace2.waitForFunction(() => document.querySelector('[data-slot="1"] .pane-header strong')?.textContent === 'replace-sch.pdf' &&
+      document.querySelector('[data-slot="1"]').getBoundingClientRect().width > 100)
+    await workspace2.locator('[data-slot="1"] .pane-status').filter({ hasText: /文字索引完成/ }).waitFor({ timeout: 30000 })
+    assert.equal(await workspace2.locator('[data-slot="0"] .pane-header strong').textContent(), 'proj2-sch.pdf')
+
     // >2 files in one launch are queued sequentially in order without silently dropping the 3rd file.
     assert.equal(spawnSync(runningExecutable, [...args, p1Sch, p1Pcb, replaceSch], { env, timeout: 30000, windowsHide: true }).status, 0)
     for (const expectedCount of ['还有 2 份待选择', '还有 1 份待选择', 'replace-sch.pdf']) {

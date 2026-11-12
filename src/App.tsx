@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
 import { PasswordResponses } from 'pdfjs-dist'
 import type { PDFDocumentLoadingTask } from 'pdfjs-dist'
 import { ArrowLeftRight, ArrowUpCircle, Check, ChevronLeft, ChevronRight, Columns2, Download, ExternalLink, Moon, Monitor, MonitorUp, PanelLeftClose, PanelLeftOpen, PanelsTopLeft, Plus, RefreshCw, Rows2, Search, Settings, Spotlight, Square, Sun, Trash2, X } from 'lucide-react'
@@ -627,7 +627,7 @@ function App() {
     return slot.name
   }
 
-  function handleLaunchPayload(payload: LaunchPayload) {
+  const handleLaunchPayload = useEffectEvent((payload: LaunchPayload) => {
     if (payload.error) { setConnectionError(payload.error); return }
     if (detached || !payload?.files?.length) return
     setConnectionError('')
@@ -645,7 +645,7 @@ function App() {
     }
     if (collapsedPane === 0) changeCollapsed(null)
     void loadBytesToSlot(0, payload.files[0].name, payload.files[0].bytes, payload.files[0].id)
-  }
+  })
 
   async function loadFile(slot: number, file: File) {
     const id = crypto.randomUUID(); readRequests.current[slot] = id

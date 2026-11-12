@@ -128,6 +128,71 @@ test('update controller rejects untrusted redirects, damaged downloads and cance
   } finally { await rm(directory, { recursive: true, force: true }) }
 })
 
+test('disposing updater removes unused downloads, awaits cancellation and preserves install recovery', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'pdf-update-dispose-'))
+  try {
+    const sample = fixture(), target = path.join(directory, 'viewer'), profile = path.join(directory, 'profile')
+    const unrelated = path.join(directory, '.pdf-update-unrelated')
+    await mkdir(target)
+    await mkdir(unrelated)
+    await writeFile(path.join(target, 'PDF Cross Probe.exe'), 'old application')
+    await writeFile(path.join(unrelated, 'keep.txt'), 'unrelated local file')
+    sample.release.assets.push({ name: 'update-manifest.json', state: 'uploaded', size: 2000,
+      browser_download_url: 'https://github.com/Tony9193/pdf-cross-probe/releases/download/v1.1.0/update-manifest.json' })
+    const fetch = async url => {
+      if (url.endsWith('/latest')) return new Response(JSON.stringify(sample.release))
+      if (url.endsWith('update-manifest.json')) return new Response(JSON.stringify(sample.envelope))
+      return new Response(sample.archive)
+    }
+    const options = { version: '1.0.0', packaged: true, platform: 'win32', arch: 'x64', publicKey,
+      userData: profile, executablePath: path.join(target, 'PDF Cross Probe.exe'), fetch }
+    const update = createUpdater(options)
+    assert.equal((await update.check(true)).phase, 'available')
+    assert.equal((await update.download()).phase, 'ready')
+    await Promise.all([update.dispose(), update.dispose()])
+    assert.deepEqual(await readdir(path.join(profile, 'updates')), [])
+    assert.deepEqual((await readdir(directory)).filter(name => name.startsWith('.pdf-update-')), ['.pdf-update-unrelated'])
+
+    const restarted = createUpdater(options)
+    assert.equal((await restarted.check(true)).phase, 'available')
+    assert.equal((await restarted.download()).phase, 'ready')
+    const stages = (await readdir(directory)).filter(name => name.startsWith('.pdf-update-') && name !== '.pdf-update-unrelated')
+    const jobs = await readdir(path.join(profile, 'updates'))
+    assert.equal(stages.length, 1)
+    assert.equal(jobs.length, 1)
+    const work = path.join(profile, 'updates', jobs[0])
+    const backup = `${target}.backup-${randomUUID()}`
+    await mkdir(backup)
+    await writeFile(path.join(backup, 'keep.txt'), 'recovery backup')
+    await writeFile(path.join(work, 'transaction.json'), JSON.stringify({ stage: path.join(directory, stages[0]), backup }))
+    await restarted.dispose()
+    assert.ok(existsSync(path.join(directory, stages[0], 'resources', 'app.asar')))
+    assert.ok(existsSync(path.join(work, 'update.zip')))
+    assert.ok(existsSync(path.join(work, 'transaction.json')))
+    assert.equal((await readFile(path.join(backup, 'keep.txt'))).toString(), 'recovery backup')
+
+    let downloadStarted
+    const started = new Promise(resolve => { downloadStarted = resolve })
+    const cancelProfile = path.join(directory, 'cancel-profile')
+    const cancelled = createUpdater({ ...options, userData: cancelProfile, fetch: async (url, request) => {
+      if (!url.endsWith('.zip')) return fetch(url)
+      return new Promise((_resolve, reject) => {
+        request.signal.addEventListener('abort', () => reject(request.signal.reason), { once: true })
+        downloadStarted()
+      })
+    } })
+    await cancelled.check(true)
+    const download = cancelled.download()
+    await started
+    await cancelled.dispose()
+    assert.equal((await download).phase, 'available')
+    assert.deepEqual(await readdir(path.join(cancelProfile, 'updates')), [])
+    assert.deepEqual((await readdir(directory)).filter(name => name.startsWith('.pdf-update-') && name !== '.pdf-update-unrelated'), stages)
+    assert.equal((await readFile(path.join(target, 'PDF Cross Probe.exe'))).toString(), 'old application')
+    assert.equal((await readFile(path.join(unrelated, 'keep.txt'))).toString(), 'unrelated local file')
+  } finally { await rm(directory, { recursive: true, force: true }) }
+})
+
 test('Windows installer starts the real new viewer and rolls back a broken executable', {
   timeout: 180000, skip: process.platform !== 'win32' || process.env.PDF_TEST_INSTALLER !== '1',
 }, async () => {

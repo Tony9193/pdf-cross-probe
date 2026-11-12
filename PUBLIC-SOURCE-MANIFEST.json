@@ -1,5 +1,5 @@
 {
-  "version": "1.1.1",
+  "version": "1.1.2",
   "files": [
     {
       "file": ".gitignore",
@@ -15,7 +15,7 @@
     },
     {
       "file": "README.md",
-      "sha256": "7cc49e321af11e633e54d353b47431fb206554dbe674c8c0da098de7d909e3e4"
+      "sha256": "713801d823173bbc5face08164973ed09763d7089a22b6f133dad6553a211f61"
     },
     {
       "file": "electron/install-update.ps1",
@@ -23,7 +23,7 @@
     },
     {
       "file": "electron/main.cjs",
-      "sha256": "5125d3dd91e94a638e1d58c9a5557760c119d32fdcdebf738a4842a45fbb9b3c"
+      "sha256": "1b38144e8c0e38dcccac8a83ce3a08d46fcb13d784214bfe71213cb4ee778bd6"
     },
     {
       "file": "electron/preload.cjs",
@@ -39,7 +39,7 @@
     },
     {
       "file": "electron/updater.cjs",
-      "sha256": "5c621b27032f5986f697ec0f972e72959ea8719c69e0aa98e28cbe4611698291"
+      "sha256": "a101597fb0966b02154beb5be12fd95ec1d9df00cde5517c5e764774005b45fd"
     },
     {
       "file": "index.html",
@@ -47,15 +47,15 @@
     },
     {
       "file": "package-lock.json",
-      "sha256": "db5a064865e2f4f32688ee2eb0715a0a1a2a046aa0cb250792945d48015680f8"
+      "sha256": "3f435c32920ed06225f1253fb11406baab8fc9b278a04f2baff6069ad25fa08e"
     },
     {
       "file": "package.json",
-      "sha256": "930d115e48df8d1644fe66dd16abcbc092b7e785ac70be8fd506e4148de450ef"
+      "sha256": "4bd155f852cb0e4e420e76964d9fe24c6138c262b7cdc6d1da020941bfdd31a1"
     },
     {
       "file": "portable/README.txt",
-      "sha256": "8d8a273520d13c663a15ffd8d80a258cccdf4b59d5b989cc4f142b2188b21fb5"
+      "sha256": "6626396c471899fc922e01b8d1cc82a31507fef4dbf350c47d65d36c8d40ef77"
     },
     {
       "file": "portable/Start.cmd",
@@ -95,7 +95,7 @@
     },
     {
       "file": "src/App.tsx",
-      "sha256": "e66a51145a106f6f33b55e42efc085890b2068142a2bcb890717e9a14d6d86e1"
+      "sha256": "2a1a3115f70dea9e0b911db8650116ba034265df6d1c23d6a059ab66c7a6ec0e"
     },
     {
       "file": "src/PdfPane.tsx",
@@ -123,7 +123,7 @@
     },
     {
       "file": "tests/electron.test.mjs",
-      "sha256": "36352f78c7f0c0e055373d0ae2587d263ec97c59c99c71212683af85ada48f41"
+      "sha256": "d4bf22a656ced66df9de89566e829dae1dd55d6467f498d59e03e3681396c32e"
     },
     {
       "file": "tests/encrypted-fixture.mjs",
@@ -147,11 +147,11 @@
     },
     {
       "file": "tests/updater.test.mjs",
-      "sha256": "9349f64091e0dc43d5ce75678f193c8c74282ff2842b410a25c1d0fd9b5f5a52"
+      "sha256": "918339440860bc4f5885e3378840456bd484ed03e4fac1436d9bfa739e8e1733"
     },
     {
       "file": "tests/viewer.test.mjs",
-      "sha256": "12d7a1d3016a182b4f5693eddd773186cfa9f76b0a2d413f7305d96d42de232b"
+      "sha256": "7ab426e908a59416d5f1498e2ce5be4ac7b1ca10d749dc56601fac5f434a8a99"
     },
     {
       "file": "tsconfig.app.json",

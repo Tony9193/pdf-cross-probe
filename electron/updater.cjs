@@ -28,7 +28,7 @@ async function fileHash(filename) {
 function createUpdater(options) {
   let state = { phase: 'idle', currentVersion: options.version, releasePage }
   let selected = null, active = null, checking = null, downloading = null, lastCheck = 0
-  let work = null, stage = null
+  let work = null, stage = null, disposing = null
   const root = path.join(options.userData, 'updates')
   const notify = patch => { state = { ...state, ...patch }; options.onStatus?.({ ...state }); return { ...state } }
   const getStatus = () => ({ ...state })
@@ -115,7 +115,7 @@ function createUpdater(options) {
   }
 
   function check(manual = false) {
-    if (['downloading', 'verifying', 'ready', 'installing'].includes(state.phase)) return Promise.resolve(getStatus())
+    if (disposing || ['downloading', 'verifying', 'ready', 'installing'].includes(state.phase)) return Promise.resolve(getStatus())
     if (checking) return checking
     if (!manual && Date.now() - lastCheck < 6 * 60 * 60 * 1000) return Promise.resolve(getStatus())
     const controller = new AbortController()
@@ -157,7 +157,7 @@ function createUpdater(options) {
 
   function download() {
     if (downloading) return downloading
-    if (!selected || state.phase !== 'available') return Promise.resolve(getStatus())
+    if (disposing || !selected || state.phase !== 'available') return Promise.resolve(getStatus())
     if (!options.packaged || (options.platform ?? process.platform) !== 'win32' || (options.arch ?? process.arch) !== 'x64') {
       return Promise.resolve(notify({ phase: 'error', message: '此运行方式不支持安装更新，请手动下载便携版' }))
     }
@@ -207,7 +207,7 @@ function createUpdater(options) {
   }
 
   async function install() {
-    if (state.phase !== 'ready' || !work || !stage || !selected) return getStatus()
+    if (disposing || state.phase !== 'ready' || !work || !stage || !selected) return getStatus()
     notify({ phase: 'installing', message: '正在准备重启安装' })
     try {
       for (const file of selected.manifest.files) {
@@ -234,6 +234,28 @@ function createUpdater(options) {
     }
   }
 
+  function dispose() {
+    if (disposing) return disposing
+    active?.abort()
+    disposing = (async () => {
+      await Promise.allSettled([checking, downloading])
+      if (state.phase === 'installing' || !work) return
+      try {
+        await lstat(path.join(work, 'transaction.json'))
+        return
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error
+      }
+      if (stage) {
+        await rm(stage, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
+        stage = null
+      }
+      await rm(work, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
+      work = null
+    })()
+    return disposing
+  }
+
   async function acknowledge() {
     const argument = process.argv.find(value => value.startsWith('--update-health='))
     const token = process.argv.find(value => value.startsWith('--update-token='))?.slice('--update-token='.length)
@@ -248,7 +270,7 @@ function createUpdater(options) {
     } catch {}
   }
 
-  return { getStatus, check, download, install, acknowledge, cancel: () => { active?.abort(); return getStatus() }, releasePage }
+  return { getStatus, check, download, install, acknowledge, dispose, cancel: () => { active?.abort(); return getStatus() }, releasePage }
 }
 
 module.exports = { createUpdater, allowedURL, fileHash }
