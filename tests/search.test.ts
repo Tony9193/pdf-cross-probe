@@ -26,6 +26,19 @@ test('forced and automatic substring matching report their mode honestly', () =>
   assert.equal(searchDocument(['COC0RK3576S0501'], 'R3501').matches.length, 0)
 })
 
+test('hidden CAD marker boundaries preserve exact references and raw identifiers', () => {
+  const text = 'PAUC104 PAUC1040 XPAUC104'
+  const index = new DocumentSearchIndex()
+  index.append(text, [3, text.indexOf('PAUC1040') + 3])
+  const reference = index.search('C104')
+  assert.equal(reference.mode, 'exact')
+  assert.deepEqual(reference.matches.map(match => text.slice(match.start, match.start + match.length)), ['C104'])
+  assert.equal(index.search('C1040').mode, 'exact')
+  assert.equal(index.search('PAUC104').mode, 'exact')
+  assert.equal(index.search('PAUC104').matches.length, 1)
+  assert.equal(searchDocument([text], 'C104').mode, 'tolerant')
+})
+
 test('case and fullwidth normalization preserve source offsets', () => {
   const text = 'Ａ r3501 Ｒ３５０１'
   const result = searchDocument([text], 'R3501')

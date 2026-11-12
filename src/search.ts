@@ -21,7 +21,13 @@ function normalize(text: string) {
   return { value, starts, ends }
 }
 
-function searchPreparedPages(pages: ReturnType<typeof normalize>[], keyword: string, forceTolerant = false): SearchResult {
+type PreparedSearchPage = ReturnType<typeof normalize> & { boundaries: Set<number> }
+
+function prepareSearchPage(text: string, boundaries: readonly number[] = []): PreparedSearchPage {
+  return { ...normalize(text), boundaries: new Set(boundaries) }
+}
+
+function searchPreparedPages(pages: PreparedSearchPage[], keyword: string, forceTolerant = false): SearchResult {
   const query = normalize(keyword.trim()).value
   if (!query) return { mode: forceTolerant ? 'tolerant' : 'exact', matches: [] }
   const exact: Match[] = []
@@ -39,7 +45,7 @@ function searchPreparedPages(pages: ReturnType<typeof normalize>[], keyword: str
       contained.push(match)
       const before = normalized.value[found - 1] ?? ''
       const after = normalized.value[found + query.length] ?? ''
-      if (!identifierCharacter.test(before) && !identifierCharacter.test(after)) exact.push(match)
+      if ((!identifierCharacter.test(before) || normalized.boundaries.has(match.start)) && !identifierCharacter.test(after)) exact.push(match)
       cursor = found + query.length
     }
   })
@@ -49,15 +55,15 @@ function searchPreparedPages(pages: ReturnType<typeof normalize>[], keyword: str
 }
 
 export class DocumentSearchIndex {
-  private pages: ReturnType<typeof normalize>[] = []
+  private pages: PreparedSearchPage[] = []
   private results = new Map<string, SearchResult>()
 
   constructor(pages: string[] = []) {
-    this.pages = pages.map(normalize)
+    this.pages = pages.map(text => prepareSearchPage(text))
   }
 
-  append(text: string) {
-    this.pages.push(normalize(text))
+  append(text: string, boundaries: readonly number[] = []) {
+    this.pages.push(prepareSearchPage(text, boundaries))
     this.results.clear()
   }
 

@@ -117,6 +117,9 @@ input[type=checkbox] { accent-color: var(--accent); }
 .sample-bar select { border: 0; background: transparent; width: 100%; font-size: 11px; color: var(--muted); height: 20px; }
 .pdf-scroll { flex: 1; min-height: 0; overflow: auto; padding: 24px; background-color: var(--canvas-bg); background-image: linear-gradient(var(--grid-line) 1px, transparent 1px), linear-gradient(90deg, var(--grid-line) 1px, transparent 1px); background-size: 20px 20px; position: relative; touch-action: pan-x pan-y; }
 .paper { position: relative; background: #fff; box-shadow: var(--shadow-md); border-radius: 2px; margin: 0; --min-font-size: 1; }
+.page-flow { min-width: 100%; }
+.page-slot { position: relative; overflow: hidden; background: #fff; contain: layout paint; }
+.pdf-scroll { overscroll-behavior: contain; }
 .paper canvas { display: block; }
 .page-content { position: absolute; top: 0; left: 0; z-index: 0; transform-origin: 0 0; }
 .detail-canvas { position: absolute; pointer-events: none; z-index: 1; }
@@ -178,8 +181,38 @@ input[type=checkbox] { accent-color: var(--accent); }
 .shortcut-grid > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 10px; border-radius: 7px; background: var(--surface-subtle); border: 1px solid var(--border-subtle); font-size: 11.5px; }
 .shortcut-grid kbd { font-family: Consolas, monospace; font-size: 11px; padding: 2px 6px; border-radius: 4px; background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow-sm); }
 .ask-slot-modal { width: min(100%, 400px); }
+.external-open-modal { width: min(100%, 560px); }
+.external-open-heading { min-width: 0; flex: 1; }
+.external-file-summary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.external-open-notice { border-radius: 0; }
+.external-open-body { gap: 14px; }
+.workspace-list { display: flex; flex-direction: column; gap: 10px; max-height: 280px; overflow: auto; padding-right: 2px; }
+.workspace-card { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; background: var(--surface-subtle); display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.workspace-card.is-new { border-color: var(--accent); background: var(--accent-soft); }
+.workspace-card-info strong, .workspace-card-top strong { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 650; }
+.workspace-card-info span { display: block; font-size: 11px; color: var(--muted); margin-top: 3px; line-height: 1.45; }
+.workspace-card-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.workspace-badges { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.workspace-badge { font-size: 10.5px; font-weight: 600; color: var(--accent); background: var(--surface); border: 1px solid var(--border); padding: 2px 7px; border-radius: 999px; }
+.workspace-slots { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.workspace-slot-line { display: flex; align-items: center; gap: 8px; font-size: 12px; min-width: 0; }
+.workspace-slot-line > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.workspace-slot-line .is-empty { color: var(--muted); }
+.workspace-card-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; }
+.workspace-card-actions button { height: 34px; justify-content: center; }
+.external-open-footer, .external-confirm-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.external-confirm-actions button { min-width: 96px; height: 36px; justify-content: center; padding: 0 14px; }
+.replace-confirm-lead { font-size: 12.5px; color: var(--text); margin: 0; line-height: 1.5; }
+.replace-confirm-list { display: flex; flex-direction: column; gap: 8px; }
+.replace-confirm-item { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-subtle); min-width: 0; }
+.replace-confirm-names { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.replace-confirm-names > div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.update-badge { color: var(--accent); border-color: var(--accent); }
+.update-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.update-notes { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; font: inherit; margin: 0; }
+.modal-body progress { width: 100%; height: 14px; accent-color: var(--accent); }
 .ask-slot-actions { padding: 18px 20px; display: flex; flex-direction: column; gap: 10px; }
 .ask-slot-actions button { height: 38px; justify-content: center; }
 @keyframes modalFadeIn { from { opacity: 0; } to { opacity: 1; } }
 @media (max-width: 1000px) { .search-sidebar { width: 215px; } .pane-toolbar { padding: 4px; } .pane-toolbar i { margin: 0 3px; } .tolerance { margin-left: 3px; } .local-badge { display: none; } }
-@media (max-width: 650px) { .app-header { padding: 8px 10px; flex-wrap: wrap; gap: 6px; } .header-actions { gap: 5px; } .icon-command span { display: none; } .search-sidebar { width: 156px; padding: 10px 8px 0; } .sidebar-title { flex-wrap: wrap; gap: 4px; } .pane-header { padding: 5px; gap: 4px; } .pane-header button span { display: none; } .pane-toolbar button { min-width: 24px; padding: 0 3px; height: 24px; } .pane-toolbar i { display: none; } .pane-toolbar .zoom-value { width: 35px; } .pane-status { padding: 4px; flex-wrap: wrap; } .pdf-scroll { padding: 16px; } .theme-options, .shortcut-grid { grid-template-columns: 1fr; } }
+@media (max-width: 650px) { .app-header { padding: 8px 10px; flex-wrap: wrap; gap: 6px; } .header-actions { gap: 5px; } .icon-command span { display: none; } .search-sidebar { width: 156px; padding: 10px 8px 0; } .sidebar-title { flex-wrap: wrap; gap: 4px; } .pane-header { padding: 5px; gap: 4px; } .pane-header button span { display: none; } .pane-toolbar button { min-width: 24px; padding: 0 3px; height: 24px; } .pane-toolbar i { display: none; } .pane-toolbar .zoom-value { width: 35px; } .pane-status { padding: 4px; flex-wrap: wrap; } .pdf-scroll { padding: 16px; } .theme-options, .shortcut-grid, .workspace-card-actions { grid-template-columns: 1fr; } }

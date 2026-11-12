@@ -8,7 +8,7 @@ export const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.u
 const rootFiles = ['.gitignore', '.oxlintrc.json', 'index.html', 'package.json', 'package-lock.json', 'README.md', 'PUBLISHING.md',
   'vite.config.ts', 'tsconfig.json', 'tsconfig.app.json', 'tsconfig.node.json']
 const sourceDirectories = ['src', 'electron', 'tests', 'scripts', 'portable']
-const textExtensions = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.css', '.json', '.cmd', '.md', '.txt', '.html'])
+const textExtensions = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.css', '.json', '.cmd', '.ps1', '.md', '.txt', '.html'])
 
 export function publicSourceFiles(root = projectRoot) {
   const files = rootFiles.filter(name => existsSync(path.join(root, name)))

@@ -4,7 +4,8 @@ import { after, afterEach, before, beforeEach, test } from 'node:test'
 import { mkdirSync } from 'node:fs'
 import { createServer } from 'vite'
 import { chromium } from 'playwright-core'
-import { degrees, PDFDocument, PDFHexString, StandardFonts } from 'pdf-lib'
+import { beginText, degrees, endText, moveText, PDFDocument, PDFHexString, popGraphicsState, pushGraphicsState,
+  setFontAndSize, setTextRenderingMode, showText, StandardFonts, TextRenderingMode } from 'pdf-lib'
 import { encryptedPdf } from './encrypted-fixture.mjs'
 
 let server, browser, context, page, url
@@ -439,6 +440,46 @@ test('divider resizes both layouts without losing documents, highlights or dual-
   await page.screenshot({ path: 'artifacts/divider-mobile.png' })
 })
 
+test('hidden CAD pad references are exact and visible identifiers remain unchanged', { timeout: 60000 }, async () => {
+  const normal = await PDFDocument.create()
+  const normalFont = await normal.embedFont(StandardFonts.Helvetica)
+  const normalPage = normal.addPage([640, 800])
+  normalPage.drawText('C104 C105 C106', { x: 80, y: 600, size: 16, font: normalFont })
+  const annotated = await PDFDocument.create()
+  const font = await annotated.embedFont(StandardFonts.Helvetica)
+  const drawing = annotated.addPage([640, 800])
+  const fontKey = drawing.node.newFontDictionary(font.name, font.ref)
+  for (const [label, top] of [['PAUC104', 600], ['PAUC105', 540], ['PAUR101', 480], ['PAUC106', 420]]) {
+    drawing.pushOperators(pushGraphicsState(), beginText(), setFontAndSize(fontKey, 16),
+      setTextRenderingMode(TextRenderingMode.Invisible), moveText(80, top), showText(font.encodeText(label)), endText(), popGraphicsState())
+  }
+  drawing.drawText('PAUC106', { x: 300, y: 420, size: 16, font })
+  const normalBytes = Buffer.from(await normal.save()), annotatedBytes = Buffer.from(await annotated.save())
+  await upload(page, 0, normalBytes, 'normal.pdf')
+  await upload(page, 1, annotatedBytes, 'annotations.pdf')
+  await addTerm(page, 'C104')
+  await page.waitForFunction(() => document.querySelector('[data-position="1:C104"]')?.textContent === '1 / 1')
+  assert.equal(await termResult(page, 'C104').locator('.document-result').nth(1).locator('small').count(), 0)
+  await page.locator('[data-slot="1"] .textLayer span').filter({ hasText: /^PAUC105$/ }).click()
+  await page.waitForFunction(() => document.querySelector('[data-position="0:C105"]')?.textContent === '1 / 1')
+  assert.equal(await termResult(page, 'C105').count(), 1)
+  assert.equal(await termResult(page, 'PAUC105').count(), 0)
+  await addTerm(page, 'PAUC104')
+  await page.waitForFunction(() => document.querySelector('[data-position="1:PAUC104"]')?.textContent === '1 / 1')
+  await page.locator('[data-slot="1"] .textLayer span').filter({ hasText: /^PAUC106$/ }).last().click()
+  assert.equal(await termResult(page, 'PAUC106').count(), 1)
+  assert.equal(await termResult(page, 'C106').count(), 0)
+  await upload(page, 0, annotatedBytes, 'annotations-left.pdf')
+  await upload(page, 1, normalBytes, 'normal-right.pdf')
+  await addTerm(page, 'C104')
+  const popup = page.waitForEvent('popup')
+  await page.getByRole('button', { name: '双屏窗口', exact: true }).click()
+  const secondary = await popup
+  await secondary.waitForFunction(() => document.querySelector('[data-position="0:C104"]')?.textContent === '1 / 1')
+  assert.equal(await termResult(secondary, 'C104').locator('.document-result').nth(0).locator('small').count(), 0)
+  await secondary.close()
+})
+
 test('split identifiers and geometry fallback select the actual clicked word', { timeout: 60000 }, async () => {
   await page.locator('[data-slot="0"] .textLayer span').filter({ hasText: /^3501$/ }).click()
   assert.equal(await termResult(page, 'R3501').count(), 1)
@@ -556,6 +597,25 @@ test('new-page graphics appear before a delayed text layer without stale highlig
   }), true)
   await page.waitForFunction(() => document.querySelector('[data-slot="0"] .paper')?.dataset.renderPhase === 'ready')
   assert.ok(await page.locator('[data-slot="0"] .textLayer span').count() > 0)
+})
+
+test('precision rendering makes progress during sustained scrolling', { timeout: 60000 }, async () => {
+  await addTerm(page, 'R3501')
+  await page.getByRole('spinbutton', { name: '文档 A 缩放百分比', exact: true }).fill('1000')
+  await page.waitForFunction(() => document.querySelector('[data-slot="0"] .detail-canvas')?.dataset.scale === '10')
+  const commits = await page.locator('[data-slot="0"]').evaluate(pane => new Promise(resolve => {
+    const scroll = pane.querySelector('.pdf-scroll'), canvas = pane.querySelector('.detail-canvas')
+    let count = 0, frames = 0
+    const observer = new MutationObserver(() => count++)
+    observer.observe(canvas, { attributes: true, attributeFilter: ['width', 'height'] })
+    const step = () => {
+      scroll.scrollTop += 12
+      if (++frames < 90) requestAnimationFrame(step)
+      else { observer.disconnect(); resolve(count) }
+    }
+    requestAnimationFrame(step)
+  }))
+  assert.ok(commits > 0, 'A continuous scroll must not starve precision rendering')
 })
 
 test('precision padding reuses small pans and redraws only outside its buffer', { timeout: 60000 }, async () => {
@@ -736,6 +796,222 @@ test('wrong password does not leak to secondary window and slot A waiting status
   await secondary.close()
 })
 
+test('three reading modes support wheel navigation and closing a document', { timeout: 90000 }, async () => {
+  const pane = page.locator('[data-slot="0"]'), scroll = pane.locator('.pdf-scroll')
+  await scroll.evaluate(element => { element.scrollTop = element.scrollHeight })
+  await scroll.dispatchEvent('wheel', { deltaY: 120 })
+  assert.equal(await pane.getByRole('spinbutton', { name: '文档 A 页码', exact: true }).inputValue(), '1')
+  await pane.getByRole('button', { name: '文档 A 连续阅读' }).click()
+  await page.waitForFunction(() => document.querySelector('[data-slot="0"] .page-flow .textLayer span'))
+  assert.equal(await pane.getAttribute('data-reading-mode'), 'continuous-scroll')
+  const second = pane.locator('[data-flow-page="2"]')
+  await second.scrollIntoViewIfNeeded()
+  await page.waitForFunction(() => document.querySelector('[aria-label="文档 A 页码"]').value === '2')
+  await second.locator('.textLayer span').filter({ hasText: /^GND$/ }).click()
+  await page.waitForFunction(() => document.querySelector('[data-position="0:GND"]')?.textContent?.trim() === '5 / 5')
+  await pane.getByRole('button', { name: '文档 A 连续阅读' }).click()
+  await page.waitForFunction(() => document.querySelector('[data-slot="0"] .paper[data-page="2"] .textLayer span'))
+  assert.equal(await pane.getAttribute('data-reading-mode'), 'off')
+  await page.getByRole('button', { name: '偏好设置' }).click()
+  await page.getByLabel('阅读模式', { exact: true }).selectOption('wheel-page')
+  await page.getByRole('button', { name: '关闭设置' }).click()
+  await pane.getByRole('spinbutton', { name: '文档 A 页码', exact: true }).fill('1')
+  await page.waitForFunction(() => document.querySelector('[data-slot="0"] .paper')?.dataset.renderedPage === '1')
+  await scroll.evaluate(element => { element.scrollTop = element.scrollHeight })
+  await scroll.dispatchEvent('wheel', { deltaY: 120 })
+  await page.waitForFunction(() => document.querySelector('[aria-label="文档 A 页码"]').value === '2')
+  await page.getByRole('button', { name: '关闭文档 A', exact: true }).click()
+  await pane.getByRole('heading', { name: '尚未打开 PDF' }).waitFor()
+  assert.equal(await pane.locator('.paper').count(), 0)
+  assert.equal(await pane.locator('.pane-status').textContent(), '未加载')
+  assert.ok((await page.evaluate(() => window.workerCounts.terminated)) >= 1)
+})
+
+test('continuous flow virtualizes mixed pages while retaining a cross-page selection', { timeout: 90000 }, async () => {
+  const document = await PDFDocument.create(), font = await document.embedFont(StandardFonts.Helvetica)
+  for (let index = 0; index < 20; index++) {
+    const drawing = document.addPage(index % 2 ? [1000, 500] : [640, 800])
+    drawing.drawText(`PAGE${index + 1}`, { x: 80, y: 350, size: 16, font })
+  }
+  await upload(page, 0, Buffer.from(await document.save()), 'mixed-pages.pdf')
+  const pane = page.locator('[data-slot="0"]')
+  await pane.getByRole('button', { name: '文档 A 连续阅读' }).click()
+  await page.waitForFunction(() => document.querySelectorAll('[data-slot="0"] [data-flow-page="2"] .textLayer span').length > 0)
+  const selected = await pane.evaluate(element => {
+    const first = element.querySelector('[data-flow-page="1"] .textLayer span').firstChild
+    const last = element.querySelector('[data-flow-page="2"] .textLayer span').firstChild
+    const range = window.document.createRange()
+    range.setStart(first, 0); range.setEnd(last, last.textContent.length)
+    getSelection().removeAllRanges(); getSelection().addRange(range)
+    return getSelection().toString()
+  })
+  assert.ok(selected.includes('PAGE1') && selected.includes('PAGE2'))
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+  await pane.locator('.pdf-scroll').evaluate(element => { element.scrollTop = element.querySelector('[data-flow-page="20"]').offsetTop })
+  await page.waitForFunction(() => document.querySelector('[data-slot="0"] .paper[data-page="20"]')?.dataset.renderPhase === 'ready')
+  assert.equal(await pane.locator('.paper[data-page="1"]').count(), 1)
+  assert.equal(await page.evaluate(() => getSelection().toString()), selected)
+  await page.evaluate(() => getSelection().removeAllRanges())
+  await page.waitForFunction(() => !document.querySelector('[data-slot="0"] .paper[data-page="1"]'))
+  assert.ok(await pane.locator('.page-flow .paper').count() <= 5)
+  await pane.getByRole('spinbutton', { name: '文档 A 缩放百分比', exact: true }).fill('10')
+  await page.waitForFunction(() => document.querySelectorAll('[data-slot="0"] .page-flow .paper').length > 3)
+  assert.deepEqual(await pane.locator('.page-slot').evaluateAll(elements => elements.slice(0, 2).map(element => element.getBoundingClientRect().height)), [80, 50])
+  await page.screenshot({ path: 'artifacts/viewer-continuous-desktop.png' })
+  await page.setViewportSize({ width: 390, height: 844 })
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 390)
+  await page.screenshot({ path: 'artifacts/viewer-continuous-mobile.png' })
+})
+
+test('continuous wheel zoom keeps cursor PDF anchor across frames, rotations, mixed pages and page gaps', { timeout: 90000 }, async () => {
+  const specs = [[640, 800], [1000, 500], [640, 800], [800, 640]]
+  const document = await PDFDocument.create(), font = await document.embedFont(StandardFonts.Helvetica)
+  specs.forEach(([width, height], index) => {
+    const drawing = document.addPage([width, height])
+    drawing.drawText(`ZOOM_PAGE_${index + 1}`, { x: Math.round(width * 0.35), y: Math.round(height * 0.45), size: 16, font })
+  })
+  await upload(page, 0, Buffer.from(await document.save()), 'continuous-zoom.pdf')
+  const pane = page.locator('[data-slot="0"]'), scroll = pane.locator('.pdf-scroll')
+  await pane.getByRole('button', { name: '文档 A 连续阅读' }).click()
+  await page.waitForFunction(() => document.querySelectorAll('[data-slot="0"] [data-flow-page="2"] .textLayer span').length > 0)
+
+  async function assertAnchoredBurst({ pageNum, baseSize, rotation, steps, inGap = false, startScale = 150, offsetX = 135, offsetY = 165 }) {
+    await pane.getByRole('spinbutton', { name: '文档 A 缩放百分比', exact: true }).fill(String(startScale))
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+    await scroll.evaluate((element, { pageNum, inGap, offsetY }) => {
+      const slot = element.querySelector(`[data-flow-page="${pageNum}"]`)
+      element.scrollLeft = 180
+      element.scrollTop = inGap
+        ? slot.offsetTop + slot.offsetHeight + 8 - offsetY
+        : slot.offsetTop + Math.min(220, slot.offsetHeight * 0.45) - offsetY + 60
+    }, { pageNum, inGap, offsetY })
+    await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 160)))
+    const bounds = await scroll.boundingBox()
+    const clientX = Math.round(bounds.x + offsetX), clientY = Math.round(bounds.y + offsetY)
+    await page.mouse.move(clientX, clientY)
+
+    const anchor = await scroll.evaluate((element, { pageNum, baseSize, rotation, clientX, clientY, inGap }) => {
+      const slot = element.querySelector(`[data-flow-page="${pageNum}"]`)
+      const rect = slot.getBoundingClientRect()
+      const [W, H] = baseSize
+      const u = (clientX - rect.left) / rect.width
+      const v = inGap ? 1 : (clientY - rect.top) / rect.height
+      const gapY = inGap ? clientY - rect.bottom : 0
+      let pdfX, pdfY
+      if (rotation === 0) { pdfX = u * W; pdfY = (1 - v) * H }
+      else if (rotation === 90) { pdfX = v * W; pdfY = u * H }
+      else if (rotation === 180) { pdfX = (1 - u) * W; pdfY = v * H }
+      else { pdfX = (1 - v) * W; pdfY = (1 - u) * H }
+      window.__zoomSamples = []
+      window.__zoomSampling = true
+      const record = source => {
+        const current = element.querySelector(`[data-flow-page="${pageNum}"]`)
+        if (!current) return
+        const box = current.getBoundingClientRect()
+        let nu, nv
+        if (rotation === 0) { nu = pdfX / W; nv = (H - pdfY) / H }
+        else if (rotation === 90) { nu = pdfY / H; nv = pdfX / W }
+        else if (rotation === 180) { nu = (W - pdfX) / W; nv = pdfY / H }
+        else { nu = (H - pdfY) / H; nv = (W - pdfX) / W }
+        const sx = box.left + nu * box.width
+        const sy = box.top + nv * box.height + gapY
+        window.__zoomSamples.push({
+          source,
+          dx: sx - clientX,
+          dy: sy - clientY,
+          scrollLeft: element.scrollLeft,
+          scrollTop: element.scrollTop,
+          slotWidth: box.width,
+        })
+      }
+      const tick = () => {
+        if (!window.__zoomSampling) return
+        record('raf')
+        requestAnimationFrame(tick)
+      }
+      window.__zoomOnScroll = () => record('scroll')
+      element.addEventListener('scroll', window.__zoomOnScroll, { passive: true })
+      record('initial')
+      requestAnimationFrame(tick)
+      return { pdfX, pdfY, gapY }
+    }, { pageNum, baseSize, rotation, clientX, clientY, inGap })
+
+    for (const batch of steps) {
+      if (Array.isArray(batch)) {
+        await scroll.evaluate((element, { deltas, clientX, clientY }) => {
+          for (const deltaY of deltas) {
+            element.dispatchEvent(new WheelEvent('wheel', { deltaY, ctrlKey: true, clientX, clientY, bubbles: true, cancelable: true }))
+          }
+        }, { deltas: batch, clientX, clientY })
+      } else {
+        await page.keyboard.down('Control')
+        await page.mouse.wheel(0, batch)
+        await page.keyboard.up('Control')
+      }
+    }
+    await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 220)))
+    const samples = await scroll.evaluate(element => {
+      window.__zoomSampling = false
+      element.removeEventListener('scroll', window.__zoomOnScroll)
+      return window.__zoomSamples
+    })
+    assert.ok(samples.length >= 3)
+    const worst = samples.reduce((acc, item) => Math.max(Math.abs(item.dx), Math.abs(item.dy)) > Math.max(Math.abs(acc.dx), Math.abs(acc.dy)) ? item : acc, samples[0])
+    assert.ok(Math.abs(worst.dx) <= 2 && Math.abs(worst.dy) <= 2,
+      `Anchor drifted on page ${pageNum} (rot=${rotation}, gap=${inGap}): worst=${JSON.stringify(worst)}, anchor=${JSON.stringify(anchor)}`)
+  }
+
+  // 1. Page 2 (mixed landscape 1000x500): zoom in burst, same-frame multi-wheel, zoom out, rapid direction reversal, plus scrollbar threshold crossing.
+  await assertAnchoredBurst({ pageNum: 2, baseSize: specs[1], rotation: 0, startScale: 60, offsetX: 110, offsetY: 140, steps: [[-100, -100], -100, -100, 100, -100] })
+  await assertAnchoredBurst({ pageNum: 2, baseSize: specs[1], rotation: 0, startScale: 160, steps: [[-100, -100, -100], -100, 100, [100, -100, 100], 100] })
+
+  // 2. Pointer on second simultaneously visible page (Page 3 while Page 2 is also visible) and inside the 20px inter-page gap.
+  await assertAnchoredBurst({ pageNum: 3, baseSize: specs[2], rotation: 0, startScale: 80, offsetX: 145, offsetY: 320, steps: [-100, [-100, -100], 100] })
+  await assertAnchoredBurst({ pageNum: 2, baseSize: specs[1], rotation: 0, startScale: 150, inGap: true, offsetX: 150, offsetY: 180, steps: [-100, -100, 100] })
+
+  // 3. Rotated 90deg and 270deg on mixed-size pages.
+  await pane.getByTitle('顺时针旋转 90°').click()
+  await page.waitForFunction(() => document.querySelector('[data-slot="0"]')?.getAttribute('data-rotation') === '90')
+  await assertAnchoredBurst({ pageNum: 2, baseSize: specs[1], rotation: 90, startScale: 150, steps: [[-100, -100], 100, -100] })
+  await pane.getByTitle('顺时针旋转 90°').click()
+  await pane.getByTitle('顺时针旋转 90°').click()
+  await page.waitForFunction(() => document.querySelector('[data-slot="0"]')?.getAttribute('data-rotation') === '270')
+  await assertAnchoredBurst({ pageNum: 4, baseSize: specs[3], rotation: 270, startScale: 150, steps: [-100, [-100, 100], 100] })
+
+  // 4. Top-left boundary clamping remains valid without NaN or negative scroll offsets.
+  await scroll.evaluate(element => element.scrollTo(0, 0))
+  await page.mouse.move(Math.round((await scroll.boundingBox()).x + 40), Math.round((await scroll.boundingBox()).y + 40))
+  await page.keyboard.down('Control'); await page.mouse.wheel(0, 100); await page.keyboard.up('Control')
+  const clamped = await scroll.evaluate(element => ({ left: element.scrollLeft, top: element.scrollTop }))
+  assert.ok(Number.isFinite(clamped.left) && Number.isFinite(clamped.top) && clamped.left >= 0 && clamped.top >= 0)
+})
+
+test('detaching B preserves its page, zoom and reading position', { timeout: 60000 }, async () => {
+  const pane = page.locator('[data-slot="1"]')
+  await pane.getByRole('spinbutton', { name: '文档 B 页码', exact: true }).fill('2')
+  await page.waitForFunction(() => document.querySelector('[data-slot="1"] .paper')?.dataset.renderedPage === '2')
+  await pane.getByRole('spinbutton', { name: '文档 B 缩放百分比', exact: true }).fill('400')
+  await pane.locator('.pdf-scroll').evaluate(element => element.scrollTo(800, 950))
+  const point = async target => target.locator('[data-slot="1"] .pdf-scroll').evaluate(element => {
+    const scale = Number(element.closest('.pdf-pane').querySelector('.zoom-value').value) / 100
+    const style = getComputedStyle(element)
+    return { x: (element.scrollLeft + element.clientWidth / 2 - parseFloat(style.paddingLeft)) / scale,
+      y: (element.scrollTop + element.clientHeight / 2 - parseFloat(style.paddingTop)) / scale }
+  })
+  await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 250)))
+  const before = await point(page)
+  const popup = page.waitForEvent('popup')
+  await page.getByRole('button', { name: '双屏窗口', exact: true }).click()
+  const secondary = await popup
+  await secondary.waitForFunction(() => document.querySelector('[aria-label="文档 B 缩放百分比"]')?.value === '400')
+  await secondary.waitForFunction(() => document.querySelector('[data-slot="1"] .paper')?.dataset.renderedPage === '2')
+  await secondary.evaluate(() => new Promise(resolve => setTimeout(resolve, 250)))
+  const after = await point(secondary)
+  assert.ok(Math.abs(after.x - before.x) < 2 && Math.abs(after.y - before.y) < 2, JSON.stringify({ before, after }))
+  await secondary.close()
+  await page.waitForFunction(() => document.querySelector('[aria-label="文档 B 缩放百分比"]')?.value === '400')
+})
+
 test('settings dialog, theme switch, sidebar collapse, pane swap, 90deg rotation and shortcuts work smoothly', { timeout: 60000 }, async () => {
   await addTerm(page, 'GND')
   await page.waitForFunction(() => document.querySelector('[data-position="0:GND"]')?.textContent === '1 / 5')
@@ -769,10 +1045,139 @@ test('settings dialog, theme switch, sidebar collapse, pane swap, 90deg rotation
   assert.equal(await page.evaluate(() => document.documentElement.dataset.theme), 'dark')
   await dialog.getByLabel('聚光灯遮罩浓度').fill('75')
   await dialog.getByLabel('聚光灯遮罩浓度').dispatchEvent('change')
-  await dialog.getByLabel('外部打开面板分配策略').selectOption('smart-a-then-b')
-  assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('pdf-cross-probe:settings:v1')).externalOpenPolicy), 'smart-a-then-b')
+  assert.ok((await dialog.textContent()).includes('从资源管理器打开 PDF 时每次选择工作区'))
+  assert.equal(await dialog.locator('[aria-label="外部打开面板分配策略"]').count(), 0)
   await dialog.getByRole('radio', { name: '浅色清爽' }).click()
   assert.equal(await page.evaluate(() => document.documentElement.dataset.theme), 'light')
   await dialog.getByRole('button', { name: '关闭设置' }).click()
   assert.equal(await dialog.count(), 0)
+})
+
+test('external open selector handles legacy settings migration, replacement confirmation, races and mobile layout', { timeout: 60000 }, async () => {
+  const custom = await browser.newContext({ viewport: { width: 1280, height: 900 } })
+  const tab = await custom.newPage()
+  try {
+    await tab.addInitScript(() => {
+      localStorage.setItem('pdf-cross-probe:settings:v1', JSON.stringify({
+        theme: 'dark',
+        externalOpenPolicy: 'single-a-dual-ab',
+        dimOpacity: 0.7,
+      }))
+      window.__resolvedDecisions = []
+      window.__externalListeners = []
+      window.__currentExternalRequest = {
+        requestId: 'req-1',
+        token: 'tok-1',
+        files: [{ name: 'CE.RK3588.EB701A_SUPER_LONG_SCHEMATIC_DRAWING_REV_B02_20261112.pdf' }],
+        preferredSlot: 1,
+        paired: false,
+        queueRemaining: 1,
+        workspaces: [
+          {
+            sessionId: 'ws-1',
+            workspaceNumber: 1,
+            isCurrent: true,
+            separated: false,
+            slots: [
+              { status: 'ready', id: 'doc-1a', name: 'Project1_Schematic_A0.pdf' },
+              { status: 'empty', id: '', name: '' },
+            ],
+          },
+          {
+            sessionId: 'ws-2',
+            workspaceNumber: 2,
+            isCurrent: false,
+            separated: true,
+            slots: [
+              { status: 'ready', id: 'doc-2a', name: 'Project2_Schematic_Very_Long_Name_V3.pdf' },
+              { status: 'password', id: 'doc-2b', name: 'Project2_Silkscreen_Locked.pdf' },
+            ],
+          },
+        ],
+      }
+      window.pdfCrossProbeDesktop = {
+        isDesktop: true,
+        openNewWindow: async () => {},
+        getUpdateStatus: async () => ({ phase: 'idle', currentVersion: '1.1.0' }),
+        checkForUpdates: async () => ({ phase: 'idle', currentVersion: '1.1.0' }),
+        downloadUpdate: async () => ({ phase: 'idle', currentVersion: '1.1.0' }),
+        cancelUpdate: async () => ({ phase: 'idle', currentVersion: '1.1.0' }),
+        installUpdate: async () => ({ phase: 'idle', currentVersion: '1.1.0' }),
+        openUpdatePage: async () => {},
+        onUpdateStatus: () => () => {},
+        consumeLaunchQueue: async () => [],
+        onLaunchFiles: () => () => {},
+        reportWorkspaceState: async () => {},
+        getExternalOpenRequest: async () => window.__currentExternalRequest,
+        resolveExternalOpen: async decision => {
+          window.__resolvedDecisions.push(decision)
+          window.__currentExternalRequest = null
+          for (const fn of window.__externalListeners) fn(null)
+          return { ok: true }
+        },
+        onExternalOpenRequest: callback => {
+          window.__externalListeners.push(callback)
+          return () => {}
+        },
+        getShellStatus: async () => ({ supported: true, enabled: true, executablePath: 'PDF Cross Probe.exe' }),
+        setShellIntegration: async enabled => ({ supported: true, enabled, executablePath: 'PDF Cross Probe.exe' }),
+      }
+    })
+    await tab.goto(url)
+    assert.equal(await tab.evaluate(() => document.documentElement.dataset.theme), 'dark')
+    const modal = tab.getByRole('dialog', { name: '选择打开位置' })
+    await modal.waitFor()
+    assert.ok((await modal.textContent()).includes('还有 1 份待选择'))
+    assert.ok((await modal.textContent()).includes('双屏 B 已分离'))
+    assert.ok((await modal.textContent()).includes('Project2_Silkscreen_Locked.pdf（等待密码）'))
+    await tab.screenshot({ path: 'artifacts/external-selector-desktop.png' })
+
+    await tab.setViewportSize({ width: 390, height: 844 })
+    assert.equal(await tab.evaluate(() => document.documentElement.scrollWidth), 390)
+    await tab.screenshot({ path: 'artifacts/external-selector-mobile.png' })
+    await tab.setViewportSize({ width: 1280, height: 900 })
+
+    // Selecting occupied slot A on workspace 1 opens replacement confirmation showing original filename.
+    await modal.getByRole('button', { name: '工作区 1 替换 A' }).click()
+    assert.ok((await modal.textContent()).includes('确认替换已有图纸'))
+    assert.ok((await modal.textContent()).includes('Project1_Schematic_A0.pdf'))
+
+    // Live slot change while confirmation is open aborts stale confirmation and shows notice.
+    await tab.evaluate(() => {
+      const updated = structuredClone(window.__currentExternalRequest)
+      updated.token = 'tok-2'
+      updated.workspaces[0].slots[0] = { status: 'ready', id: 'doc-1a-new', name: 'Changed_Schematic_A1.pdf' }
+      window.__currentExternalRequest = updated
+      for (const fn of window.__externalListeners) fn(updated)
+    })
+    await modal.getByRole('alert').filter({ hasText: '目标面板的图纸已发生变化' }).waitFor()
+    assert.equal(await modal.getByRole('button', { name: '确认替换' }).count(), 0)
+
+    // Selecting occupied slot B on workspace 2, then workspace 2 closes -> resets confirmation with target-closed notice.
+    await modal.getByRole('button', { name: '工作区 2 替换 B' }).click()
+    assert.ok((await modal.textContent()).includes('Project2_Silkscreen_Locked.pdf'))
+    await tab.evaluate(() => {
+      const updated = structuredClone(window.__currentExternalRequest)
+      updated.token = 'tok-3'
+      updated.workspaces = updated.workspaces.slice(0, 1)
+      window.__currentExternalRequest = updated
+      for (const fn of window.__externalListeners) fn(updated)
+    })
+    await modal.getByRole('alert').filter({ hasText: '所选工作区已关闭' }).waitFor()
+
+    // Selecting empty slot B on workspace 1 submits immediately without extra confirmation.
+    await modal.getByRole('button', { name: '工作区 1 放入 B' }).click()
+    await tab.waitForFunction(() => !document.querySelector('[aria-label="选择打开位置"]'))
+    const decisions = await tab.evaluate(() => window.__resolvedDecisions)
+    assert.equal(decisions.length, 1)
+    assert.deepEqual(decisions[0], {
+      requestId: 'req-1',
+      token: 'tok-3',
+      action: 'open',
+      slot: 1,
+      target: { sessionId: 'ws-1', expectedSlotIds: ['doc-1a-new', ''] },
+    })
+  } finally {
+    await custom.close()
+  }
 })

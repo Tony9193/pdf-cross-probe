@@ -1,14 +1,14 @@
 {
   "name": "bom-compare",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.1.1",
   "description": "Offline linked PDF viewer for hardware schematic and reference-designator review",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
-    "test": "node --experimental-strip-types --test tests/search.test.ts",
+    "build": "tsc -b && vite build && node scripts/build-desktop.mjs",
+    "test": "node --experimental-strip-types --test tests/search.test.ts tests/reading.test.ts tests/updater.test.mjs",
     "test:viewer": "node --experimental-strip-types --test --test-concurrency=1 tests/viewer.test.mjs",
     "lint": "oxlint",
     "preview": "vite preview",
@@ -18,7 +18,7 @@
     "export:public": "node scripts/export-public.mjs",
     "audit:release": "node scripts/audit-distribution.mjs",
     "package:win": "npm run build && electron-builder --win zip --x64",
-    "postpackage:win": "npm run audit:release"
+    "postpackage:win": "npm run audit:release && node scripts/sign-release.mjs"
   },
   "build": {
     "appId": "local.pdf.crossprobe",
@@ -26,7 +26,7 @@
     "artifactName": "PDF-Cross-Probe-${version}-win-${arch}.${ext}",
     "electronDist": "node_modules/electron/dist",
     "directories": {
-      "output": "release/1.0.0"
+      "output": "release/1.1.1"
     },
     "files": [
       "dist/**/*",
@@ -48,6 +48,14 @@
       {
         "from": "node_modules/pdfjs-dist/LICENSE",
         "to": "PDFJS-LICENSE.txt"
+      },
+      {
+        "from": "node_modules/yauzl/LICENSE",
+        "to": "YAUZL-LICENSE.txt"
+      },
+      {
+        "from": "node_modules/pend/LICENSE",
+        "to": "PEND-LICENSE.txt"
       }
     ],
     "win": {
@@ -69,12 +77,14 @@
     "@vitejs/plugin-react": "^6.1.2",
     "electron": "^45.2.2",
     "electron-builder": "^26.18.0",
+    "esbuild": "^0.28.2",
     "fflate": "^0.8.3",
     "oxlint": "^1.89.0",
     "pdf-lib": "^1.17.1",
     "pdfkit": "^0.20.2",
     "playwright-core": "^1.64.1",
     "typescript": "~7.0.2",
-    "vite": "^8.3.5"
+    "vite": "^8.3.5",
+    "yauzl": "^3.4.0"
   }
 }

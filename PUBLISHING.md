@@ -32,3 +32,11 @@ The checks detect common credentials, user-home paths, credential-bearing URLs a
 - Keep third-party copyright and license notices intact. Names in Electron, Chromium, PDF.js and font licenses identify upstream rights holders, not project-private company data.
 
 The automated result is a scoped inspection, not a guarantee about unknown company identifiers, future files, external folders, cloud backups or machine-wide data. The original source documents outside this workspace are not modified by the export.
+
+## Signed Updates
+
+The updater accepts only a signed manifest for the fixed repository's newer stable Windows x64 ZIP. `npm.cmd run package:win` bundles ZIP parsing dependencies into the desktop module, audits the package, and invokes `scripts/sign-release.mjs`. If a matching publisher key is available it creates `update-manifest.json`; otherwise the ZIP is for manual installation only. `exports/publish-release.mjs` verifies the archive, signature and all file hashes before allowing publication and includes the signed manifest as a Release asset.
+
+The publisher's Ed25519 private key must remain outside the repository. Initialize a new publisher key with `node scripts/sign-release.mjs --init`; only the public key is printed. The default private key location uses `LOCALAPPDATA` (or the user home fallback) under `PDFCrossProbePublisher/update-signing.pem`; an external `PDF_UPDATE_SIGNING_KEY` path may override it. Keep an access-controlled offline backup. Never commit, upload, paste into a chat, or include this private key in a package. A different key does not match the shipped public trust key and cannot sign official automatic updates; key rotation requires an intentionally authenticated migration. Update signatures do not provide Windows Authenticode signing or remove Windows reputation warnings.
+
+Do not overwrite published versions. Keep version metadata, UI version, output directory, ZIP name and manifest version aligned. The first updater-enabled release must be installed manually from v1.0.0. Run the opt-in installer tests only on temporary copies, including successful startup, a broken executable, and recovery after the backup rename. No GitHub publication or end-user in-place installation should occur as part of normal tests.

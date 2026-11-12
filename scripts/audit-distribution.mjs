@@ -23,7 +23,7 @@ for (const folder of folders) {
   function inspect(name, buffer) {
     if (/license|notice|copyright/i.test(name)) { licensesPreserved++; return }
     if (/\.(pdf|sch|pcb|brd|xlsx|csv|dmp)$/i.test(name)) findings.push({ file: name, category: 'private-document-type' })
-    if (!/\.(js|mjs|cjs|json|html|css|svg|md|txt|cmd|map|ya?ml)$/i.test(name)) return
+    if (!/\.(js|mjs|cjs|json|html|css|svg|md|txt|cmd|ps1|map|ya?ml)$/i.test(name)) return
     checked++
     for (const category of auditText(`${name}\n${buffer.toString('utf8')}`, privateTerms)) findings.push({ file: name, category })
   }
@@ -41,7 +41,7 @@ for (const folder of folders) {
         companionFiles.push(name)
         if (name === 'resources/app.asar') continue
         if (/\.(pdf|sch|pcb|brd|xlsx|csv|dmp|log|map|ya?ml)$/i.test(name) && !/license|notice|copyright/i.test(name)) findings.push({ file: name, category: 'unexpected-release-file' })
-        if (/\.(js|mjs|cjs|json|html|css|svg|md|txt|cmd|map|ya?ml)$/i.test(name)) inspect(name, readFileSync(path.join(directory, item.name)))
+        if (/\.(js|mjs|cjs|json|html|css|svg|md|txt|cmd|ps1|map|ya?ml)$/i.test(name)) inspect(name, readFileSync(path.join(directory, item.name)))
       }
     }
   }

@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0",
+  "version": "1.1.1",
   "files": [
     {
       "file": ".gitignore",
@@ -11,19 +11,35 @@
     },
     {
       "file": "PUBLISHING.md",
-      "sha256": "24d5e70be56cfebad15cb64bd24b0ecfdbab0bd19d4da2bbed99ae5207accaaa"
+      "sha256": "3fc190fc7ccf3bc5eb3d2f4f74d848e246481d376f015249bb9c153b1e46c1fe"
     },
     {
       "file": "README.md",
-      "sha256": "dbdacee6994fd338c3b2eb55f9712c531d87abffef13abd8497f7d5e73c534b0"
+      "sha256": "7cc49e321af11e633e54d353b47431fb206554dbe674c8c0da098de7d909e3e4"
+    },
+    {
+      "file": "electron/install-update.ps1",
+      "sha256": "f808d42085fe63ce0e223060ec934ac0e1733a3a4db539022ee3ee53c9beedca"
     },
     {
       "file": "electron/main.cjs",
-      "sha256": "8c4ae4a5e2c577c4e210f13b518105c9374b8f198f60ec8c3372b66db060fea8"
+      "sha256": "5125d3dd91e94a638e1d58c9a5557760c119d32fdcdebf738a4842a45fbb9b3c"
     },
     {
       "file": "electron/preload.cjs",
-      "sha256": "9babf6024ac25e283505ebef7c6cbff0929a164d656202d734092fa7d0c768f5"
+      "sha256": "171c0ea65e6d05b7f7ebc86c8866d201bc4b4632f7a3e3d0dacc58eb78e74edb"
+    },
+    {
+      "file": "electron/update-core.cjs",
+      "sha256": "20a35e15ceea7e69400b6f28d8822df7c9d5759e9d3ad4864e43a80dbbf79782"
+    },
+    {
+      "file": "electron/update-key.cjs",
+      "sha256": "0de62ba9b967524aab4250fb5d02687b5cd015d31f44e2b12e5988e6c1d5c60d"
+    },
+    {
+      "file": "electron/updater.cjs",
+      "sha256": "5c621b27032f5986f697ec0f972e72959ea8719c69e0aa98e28cbe4611698291"
     },
     {
       "file": "index.html",
@@ -31,15 +47,15 @@
     },
     {
       "file": "package-lock.json",
-      "sha256": "caf01502f81b55cd35a5619f39a7ee45f9f7b4935aa16194fc60400ca4e2f0a3"
+      "sha256": "db5a064865e2f4f32688ee2eb0715a0a1a2a046aa0cb250792945d48015680f8"
     },
     {
       "file": "package.json",
-      "sha256": "489f1dbe235c2c4e4c05a4758ca9d2efd07f5fe1f308d57825f6d11ed6e3af55"
+      "sha256": "930d115e48df8d1644fe66dd16abcbc092b7e785ac70be8fd506e4148de450ef"
     },
     {
       "file": "portable/README.txt",
-      "sha256": "77ad0c57c8262964e3526a1e4add161dd61a3f8159cb1334f80745779df92ce8"
+      "sha256": "8d8a273520d13c663a15ffd8d80a258cccdf4b59d5b989cc4f142b2188b21fb5"
     },
     {
       "file": "portable/Start.cmd",
@@ -55,7 +71,11 @@
     },
     {
       "file": "scripts/audit-distribution.mjs",
-      "sha256": "d6ad3e878abb47cdc1114c0f0c8391d694c0f934bc13035e9998ad40822167a2"
+      "sha256": "6b9653130a38cdb27e6f7cf392d0b4f029e314985d7a7b84be85e99a94dd062a"
+    },
+    {
+      "file": "scripts/build-desktop.mjs",
+      "sha256": "5252de4a5ab6dfdda54baebf9098c702e52a4eaee952dbac43b5a12b15a507f3"
     },
     {
       "file": "scripts/export-public.mjs",
@@ -63,19 +83,23 @@
     },
     {
       "file": "scripts/public-source.mjs",
-      "sha256": "6c305ecddedd2fddb7ca1ba16be142c0a9bd256d1496c85353910ab1f530909f"
+      "sha256": "e9ab4f51db7207fcf7e2318bab333f8a144f04b0576a46124004d194bd580dcc"
+    },
+    {
+      "file": "scripts/sign-release.mjs",
+      "sha256": "5078ac05b6b0a17accd70aa3b197b580b0fcb2051e8fc9bd0d948a9830b7c5dc"
     },
     {
       "file": "src/App.css",
-      "sha256": "f5ec0bde0682911c588decf170c9c12ec4ec3cdb7b7da45c08a2ee0cbdb4e6d7"
+      "sha256": "3678ed60261aa37a919ac6f1f57aff738633c7d4cbdb35c8d0fa58fb99d4003c"
     },
     {
       "file": "src/App.tsx",
-      "sha256": "140016fac8443babf6d5541b4566405ae922bbb3e0a0798f0480391d59c2621e"
+      "sha256": "e66a51145a106f6f33b55e42efc085890b2068142a2bcb890717e9a14d6d86e1"
     },
     {
       "file": "src/PdfPane.tsx",
-      "sha256": "092a509805d0eaa97c08df83733f9c52274455e279291a4cebcaf49ac48594d6"
+      "sha256": "7e5579ad542d05cd38313fa75da90c7e726e2d3287e37f4f64374ed7687cc06d"
     },
     {
       "file": "src/index.css",
@@ -87,15 +111,19 @@
     },
     {
       "file": "src/pdf.ts",
-      "sha256": "36294baca9e680e65b8bfa75cfd8ef941fb317a6caf1abd6f6a9daa598762bc0"
+      "sha256": "7b900c3c2988201de5225b2a9aa786243d3aec67efb0a259e8c9ed9e6564c375"
+    },
+    {
+      "file": "src/reading.ts",
+      "sha256": "bf532764d1d422f5e8f9e6721dbee3f6a747386b7980af14a567a557764a38e6"
     },
     {
       "file": "src/search.ts",
-      "sha256": "ebe468331a456de90fb4027bf5243116a5433802e3e715caa8dd3bc288750f55"
+      "sha256": "2c93786cc07b388a199d9cc05a148fe3a96882474b78162f32e264d5bec5e179"
     },
     {
       "file": "tests/electron.test.mjs",
-      "sha256": "93835034ae1a8b7f1ecbdf6293cdee459be7d1cb8de3233111dd6ad51d84e1a6"
+      "sha256": "36352f78c7f0c0e055373d0ae2587d263ec97c59c99c71212683af85ada48f41"
     },
     {
       "file": "tests/encrypted-fixture.mjs",
@@ -106,12 +134,24 @@
       "sha256": "6235644ba1238642caa1e774816f589267ab64a3b7402ca43c5f10a92b04e05c"
     },
     {
+      "file": "tests/reading.test.ts",
+      "sha256": "83826e7f14df0d95384648a81ac153d964c4a4b90775f5306a8021fec4f21db1"
+    },
+    {
+      "file": "tests/real-pdfs.test.mjs",
+      "sha256": "2dea891406be2ef442efb475e307dfcd6c1f56486ff272f21486139326225954"
+    },
+    {
       "file": "tests/search.test.ts",
-      "sha256": "0b43857c260fb61ee9ba9fbe72f6f98decaf7bbb9fe2d057e7c9d1e6d682cd83"
+      "sha256": "f848633cd4b7a4cc6d397afadefc9278265876b0938e855c2c15da58bb990d0c"
+    },
+    {
+      "file": "tests/updater.test.mjs",
+      "sha256": "9349f64091e0dc43d5ce75678f193c8c74282ff2842b410a25c1d0fd9b5f5a52"
     },
     {
       "file": "tests/viewer.test.mjs",
-      "sha256": "dad54ae7c3f0f5fa18de7181bdc6d40660abc98ae6447d0218398538fb86d8f8"
+      "sha256": "12d7a1d3016a182b4f5693eddd773186cfa9f76b0a2d413f7305d96d42de232b"
     },
     {
       "file": "tsconfig.app.json",
