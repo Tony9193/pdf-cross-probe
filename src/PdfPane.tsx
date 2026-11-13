@@ -797,7 +797,7 @@ export default function PdfPane(props: Props) {
         const cached = detailRegion.current
         if (cached?.scale === scale && cached.left <= visibleLeft && cached.top <= visibleTop &&
           cached.left + cached.width >= visibleRight && cached.top + cached.height >= visibleBottom) return
-        const paddingX = Math.ceil(scroll.clientWidth * 0.15), paddingY = Math.ceil(scroll.clientHeight * 0.15)
+        const paddingX = Math.ceil(scroll.clientWidth * 0.35), paddingY = Math.ceil(scroll.clientHeight * 0.35)
         const left = Math.max(0, Math.floor(visibleLeft - paddingX + Math.min(0, aheadX)))
         const top = Math.max(0, Math.floor(visibleTop - paddingY + Math.min(0, aheadY)))
         const right = Math.min(rendered.width * scale, Math.ceil(visibleRight + paddingX + Math.max(0, aheadX)))

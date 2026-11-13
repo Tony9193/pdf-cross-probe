@@ -1,5 +1,21 @@
-param([Parameter(Mandatory = $true)][string]$TransactionFile)
+param([Parameter(Mandatory = $true)][string]$TransactionFile, [switch]$Launch)
 $ErrorActionPreference = 'Stop'
+if ($Launch) {
+  $helper = [IO.Path]::GetFullPath($PSCommandPath)
+  $journal = [IO.Path]::GetFullPath($TransactionFile)
+  $workingDirectory = [IO.Path]::GetDirectoryName($journal)
+  if ([IO.Path]::GetDirectoryName($helper) -ne $workingDirectory -or
+      [IO.Path]::GetFileName($helper) -ne 'install-update.ps1' -or
+      [IO.Path]::GetFileName($journal) -ne 'transaction.json') { throw 'Invalid update launcher' }
+  $executable = [IO.Path]::Combine($PSHOME, 'powershell.exe')
+  $command = '"{0}" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{1}" -TransactionFile "{2}"' -f $executable, $helper, $journal
+  $startup = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16]0 }
+  $created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+    CommandLine = $command; CurrentDirectory = $workingDirectory; ProcessStartupInformation = $startup
+  }
+  if ($created.ReturnValue -ne 0 -or $created.ProcessId -le 0) { throw 'Cannot start update helper' }
+  exit 0
+}
 $transaction = [IO.File]::ReadAllText($TransactionFile, [Text.Encoding]::UTF8) | ConvertFrom-Json
 $target = [IO.Path]::GetFullPath($transaction.target)
 $stage = [IO.Path]::GetFullPath($transaction.stage)
@@ -19,7 +35,7 @@ $child = $null
 $healthy = $false
 
 function Write-State([string]$phase, [string]$message = '') {
-  $result = @{ phase = $phase; token = $transaction.token; version = $transaction.version; message = $message }
+  $result = @{ phase = $phase; token = $transaction.token; version = $transaction.version; message = $message; helperPid = $PID }
   if ($child) { $result.pid = $child.Id }
   [IO.File]::WriteAllText($transaction.status, ($result | ConvertTo-Json -Compress), $encoding)
 }

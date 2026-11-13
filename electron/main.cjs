@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, Menu, protocol, session, shell } = require('electron')
+const { app, BrowserWindow, dialog, ipcMain, Menu, net, protocol, session, shell } = require('electron')
 const { execFile } = require('node:child_process')
 const { open, readFile } = require('node:fs/promises')
 const path = require('node:path')
@@ -570,11 +570,11 @@ app.whenReady().then(async () => {
   session.defaultSession.webRequest.onBeforeRequest({ urls: ['<all_urls>'] }, (details, callback) => {
     callback({ cancel: /^(https?|wss?|ftp):/i.test(details.url) })
   })
-  const { createUpdater } = require(app.isPackaged ? path.join(app.getAppPath(), 'dist/desktop/updater.cjs') : './updater.cjs')
+  const { createUpdater, createElectronFetch } = require(app.isPackaged ? path.join(app.getAppPath(), 'dist/desktop/updater.cjs') : './updater.cjs')
   const updateSession = session.fromPartition('updates')
   updater = createUpdater({ version: app.getVersion(), userData: app.getPath('userData'), executablePath: process.execPath,
     packaged: app.isPackaged, helperPath: path.join(__dirname, 'install-update.ps1'),
-    fetch: (url, options) => updateSession.fetch(url, options),
+    fetch: createElectronFetch(net, updateSession),
     onStatus: status => { for (const window of BrowserWindow.getAllWindows()) if (viewerUrl(window.webContents.getURL())) window.webContents.send('desktop:update-state', status) },
     onInstall: () => setImmediate(() => app.quit()) })
   const startupArgs = process.argv.slice(app.isPackaged ? 1 : 2)

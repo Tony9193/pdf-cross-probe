@@ -652,6 +652,44 @@ test('precision padding reuses small pans and redraws only outside its buffer', 
   await page.evaluate(() => window.precisionObserver.disconnect())
 })
 
+test('precision coverage retains sharp content during moderate pans before redraw', { timeout: 60000 }, async () => {
+  await addTerm(page, 'R3501')
+  await page.getByRole('spinbutton', { name: '文档 A 缩放百分比', exact: true }).fill('1000')
+  for (const mode of ['single', 'continuous']) {
+    if (mode === 'continuous') await page.getByRole('button', { name: '文档 A 连续阅读' }).click()
+    await page.locator('.term-name').filter({ hasText: /^R3501$/ }).click()
+    await page.waitForFunction(() => {
+      const pane = document.querySelector('[data-slot="0"]'), tile = pane.querySelector('.paper[data-page="1"] .detail-canvas')
+      if (!tile) return false
+      const scroll = pane.querySelector('.pdf-scroll'), viewport = scroll.getBoundingClientRect(), box = tile.getBoundingClientRect()
+      return tile.dataset.scale === '10' && box.left <= viewport.left && box.top <= viewport.top &&
+        box.right >= viewport.left + scroll.clientWidth && box.bottom >= viewport.top + scroll.clientHeight
+    })
+    const coverage = await page.locator('[data-slot="0"]').evaluate(pane => {
+      const scroll = pane.querySelector('.pdf-scroll'), paper = pane.querySelector('.paper[data-page="1"]'), tile = paper.querySelector('.detail-canvas')
+      const viewport = scroll.getBoundingClientRect(), before = tile.getBoundingClientRect()
+      const directionX = viewport.left - before.left <= before.right - viewport.left - scroll.clientWidth ? -1 : 1
+      const directionY = viewport.top - before.top <= before.bottom - viewport.top - scroll.clientHeight ? -1 : 1
+      const oldLeft = scroll.scrollLeft, oldTop = scroll.scrollTop
+      scroll.scrollBy(directionX * scroll.clientWidth * 0.25, directionY * scroll.clientHeight * 0.25)
+      const after = tile.getBoundingClientRect(), pageBounds = paper.getBoundingClientRect()
+      const visibleLeft = Math.max(viewport.left, pageBounds.left), visibleTop = Math.max(viewport.top, pageBounds.top)
+      const visibleRight = Math.min(viewport.left + scroll.clientWidth, pageBounds.right)
+      const visibleBottom = Math.min(viewport.top + scroll.clientHeight, pageBounds.bottom)
+      return {
+        movedX: Math.abs(scroll.scrollLeft - oldLeft) / scroll.clientWidth,
+        movedY: Math.abs(scroll.scrollTop - oldTop) / scroll.clientHeight,
+        uncoveredX: Math.max(0, after.left - visibleLeft, visibleRight - after.right),
+        uncoveredY: Math.max(0, after.top - visibleTop, visibleBottom - after.bottom),
+        pixels: tile.width * tile.height,
+      }
+    })
+    assert.ok(coverage.movedX >= 0.24 && coverage.movedY >= 0.24, `${mode}: ${JSON.stringify(coverage)}`)
+    assert.ok(coverage.uncoveredX <= 2 && coverage.uncoveredY <= 2, `${mode}: ${JSON.stringify(coverage)}`)
+    assert.ok(coverage.pixels <= 6000000, `${mode}: ${JSON.stringify(coverage)}`)
+  }
+})
+
 test('high zoom remains bounded, cursor anchored and draggable on desktop and mobile', { timeout: 60000 }, async () => {
   await addTerm(page, 'R3501')
   await page.getByRole('spinbutton', { name: '文档 A 缩放百分比', exact: true }).fill('1000')

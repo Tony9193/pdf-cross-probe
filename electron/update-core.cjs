@@ -1,6 +1,7 @@
 const { createHash, createPublicKey, verify } = require('node:crypto')
-const { createWriteStream } = require('node:fs')
-const { mkdir, rm } = require('node:fs/promises')
+const filesystem = process.versions.electron ? require('original-fs') : require('node:fs')
+const { createWriteStream } = filesystem
+const { mkdir, rm } = filesystem.promises
 const path = require('node:path')
 const { Transform } = require('node:stream')
 const { pipeline } = require('node:stream/promises')

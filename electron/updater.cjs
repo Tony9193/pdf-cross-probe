@@ -1,6 +1,8 @@
 const { createHash, randomUUID } = require('node:crypto')
-const { createWriteStream, createReadStream, constants } = require('node:fs')
-const { access, copyFile, lstat, mkdir, mkdtemp, readFile, realpath, rm, statfs, writeFile } = require('node:fs/promises')
+const filesystem = process.versions.electron ? require('original-fs') : require('node:fs')
+const { createWriteStream, createReadStream, constants } = filesystem
+const { access, lstat, mkdir, mkdtemp, readFile, realpath, rm, statfs, writeFile } = filesystem.promises
+const { copyFile } = require('node:fs/promises')
 const path = require('node:path')
 const { spawn } = require('node:child_process')
 const { Transform, Readable } = require('node:stream')
@@ -23,6 +25,77 @@ async function fileHash(filename) {
   const hash = createHash('sha256')
   for await (const chunk of createReadStream(filename)) hash.update(chunk)
   return hash.digest('hex')
+}
+
+function createElectronFetch(net, updateSession) {
+  return (value, { signal, headers }) => new Promise((resolve, reject) => {
+    let request, responseStream, settled = false
+    const cleanup = () => signal?.removeEventListener('abort', abort)
+    const fail = error => {
+      if (!settled) { settled = true; cleanup(); reject(error) }
+      else responseStream?.destroy(error)
+    }
+    const abort = () => {
+      fail(signal?.reason ?? new Error('Update request aborted'))
+      request?.abort()
+    }
+    try {
+      signal?.throwIfAborted()
+      request = net.request({ url: allowedURL(value).href, session: updateSession, redirect: 'manual', headers })
+      request.on('error', fail)
+      request.on('redirect', (status, _method, redirectUrl) => {
+        if (settled) return
+        try {
+          const response = new Response(null, { status, headers: { location: redirectUrl } })
+          settled = true; cleanup(); resolve(response)
+        } catch (error) { fail(error) }
+        request.abort()
+      })
+      request.on('response', response => {
+        if (settled) { request.abort(); return }
+        responseStream = response
+        let ended = false
+        response.once('end', () => { ended = true; cleanup() })
+        response.once('aborted', () => response.destroy(new Error('Update response aborted')))
+        response.once('close', () => { cleanup(); if (!ended) request.abort() })
+        try {
+          const hasBody = ![204, 205, 304].includes(response.statusCode)
+          const result = new Response(hasBody ? Readable.toWeb(response) : null, { status: response.statusCode, headers: response.headers })
+          settled = true; resolve(result)
+          if (!hasBody) { cleanup(); request.abort() }
+        } catch (error) { fail(error); request.abort() }
+      })
+      signal?.addEventListener('abort', abort, { once: true })
+      if (signal?.aborted) { abort(); return }
+      request.end()
+    } catch (error) { fail(error); request?.abort() }
+  })
+}
+
+function waitForInstaller(work, token) {
+  return new Promise((resolve, reject) => {
+    let watcher, timer, finished = false
+    const finish = error => {
+      if (finished) return
+      finished = true; clearTimeout(timer); watcher?.close()
+      if (error) reject(error)
+      else resolve()
+    }
+    const inspect = async () => {
+      try {
+        const status = JSON.parse(await readFile(path.join(work, 'result.json'), 'utf8'))
+        if (status.token !== token) return
+        if (status.phase === 'waiting') finish()
+        else if (['rolled-back', 'recovery-needed'].includes(status.phase)) finish(new Error('Update helper failed to start'))
+      } catch {}
+    }
+    try {
+      watcher = filesystem.watch(work, () => void inspect())
+      watcher.once('error', finish)
+      timer = setTimeout(() => finish(new Error('Update helper did not become ready')), 30000)
+      void inspect()
+    } catch (error) { finish(error) }
+  })
 }
 
 function createUpdater(options) {
@@ -223,10 +296,11 @@ function createUpdater(options) {
       await copyFile(options.helperPath, helper)
       await new Promise((resolve, reject) => {
         const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', helper,
-          '-TransactionFile', journal], { detached: true, windowsHide: true, stdio: 'ignore', cwd: work })
+          '-TransactionFile', journal, '-Launch'], { windowsHide: true, stdio: 'ignore', cwd: work })
         child.once('error', reject)
-        child.once('spawn', () => { child.unref(); resolve() })
+        child.once('exit', code => code === 0 ? resolve() : reject(new Error('Unable to launch update helper')))
       })
+      await waitForInstaller(work, token)
       options.onInstall?.()
       return getStatus()
     } catch {
@@ -273,4 +347,4 @@ function createUpdater(options) {
   return { getStatus, check, download, install, acknowledge, dispose, cancel: () => { active?.abort(); return getStatus() }, releasePage }
 }
 
-module.exports = { createUpdater, allowedURL, fileHash }
+module.exports = { createUpdater, createElectronFetch, allowedURL, fileHash }

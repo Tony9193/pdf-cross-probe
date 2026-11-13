@@ -193,6 +193,41 @@ test('disposing updater removes unused downloads, awaits cancellation and preser
   } finally { await rm(directory, { recursive: true, force: true }) }
 })
 
+test('failed update helper startup keeps the old application and recovery transaction', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'pdf-update-helper-failure-'))
+  try {
+    const sample = fixture(), target = path.join(directory, 'viewer'), profile = path.join(directory, 'profile')
+    const helper = path.join(directory, 'failing-helper.ps1')
+    await mkdir(target)
+    await writeFile(path.join(target, 'PDF Cross Probe.exe'), 'old application')
+    await writeFile(helper, 'param([string]$TransactionFile, [switch]$Launch)\nexit 1\n')
+    sample.release.assets.push({ name: 'update-manifest.json', state: 'uploaded', size: 2000,
+      browser_download_url: 'https://github.com/Tony9193/pdf-cross-probe/releases/download/v1.1.0/update-manifest.json' })
+    let closed = false
+    const updater = createUpdater({ version: '1.0.0', packaged: true, platform: 'win32', arch: 'x64', publicKey,
+      userData: profile, executablePath: path.join(target, 'PDF Cross Probe.exe'), helperPath: helper,
+      onInstall: () => { closed = true }, fetch: async url => {
+        if (url.endsWith('/latest')) return new Response(JSON.stringify(sample.release))
+        if (url.endsWith('update-manifest.json')) return new Response(JSON.stringify(sample.envelope))
+        return new Response(sample.archive)
+      } })
+    assert.equal((await updater.check(true)).phase, 'available')
+    assert.equal((await updater.download()).phase, 'ready')
+    assert.equal((await updater.install()).phase, 'error')
+    assert.equal(closed, false)
+    assert.equal((await readFile(path.join(target, 'PDF Cross Probe.exe'))).toString(), 'old application')
+    const jobs = await readdir(path.join(profile, 'updates'))
+    assert.equal(jobs.length, 1)
+    const journal = JSON.parse(await readFile(path.join(profile, 'updates', jobs[0], 'transaction.json'), 'utf8'))
+    assert.ok(existsSync(journal.stage))
+    await updater.dispose()
+    assert.ok(existsSync(journal.stage))
+    assert.ok(existsSync(path.join(profile, 'updates', jobs[0], 'transaction.json')))
+  } finally { await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }) }
+})
+
 test('Windows installer starts the real new viewer and rolls back a broken executable', {
   timeout: 180000, skip: process.platform !== 'win32' || process.env.PDF_TEST_INSTALLER !== '1',
 }, async () => {

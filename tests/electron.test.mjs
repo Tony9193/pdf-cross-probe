@@ -1,12 +1,276 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { spawnSync } from 'node:child_process'
+import { createHash, generateKeyPairSync, sign } from 'node:crypto'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, watch, writeFileSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
+import { once } from 'node:events'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { _electron } from 'playwright-core'
 import { PDFDocument, StandardFonts } from 'pdf-lib'
+import { zipSync } from 'fflate'
 import { encryptedPdf } from './encrypted-fixture.mjs'
+
+test('desktop updater processes trusted redirects and rejects untrusted or endless redirects', { timeout: 60000 }, async () => {
+  const configuration = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  const packaged = path.resolve(process.env.PDF_TEST_EXECUTABLE ?? path.join(configuration.build.directories.output, 'win-unpacked/PDF Cross Probe.exe'))
+  const executablePath = !process.env.PDF_TEST_SOURCE && existsSync(packaged) ? packaged : undefined
+  const temporary = mkdtempSync(path.join(tmpdir(), 'pdf-update-redirect-'))
+  const env = { ...process.env, PDF_CROSS_PROBE_MOCK_REGISTRY: '1' }
+  delete env.ELECTRON_RUN_AS_NODE
+  let app
+  try {
+    const args = [...(executablePath ? [] : [path.resolve('.')]), `--user-data-dir=${path.join(temporary, 'profile')}`]
+    app = await _electron.launch({ executablePath, args, env, timeout: 60000 })
+    const main = await app.firstWindow()
+    await main.getByRole('heading', { name: 'PDF 联动查看器', exact: true }).waitFor({ timeout: 30000 })
+    await app.evaluate(({ session }, version) => {
+      globalThis.updateProbeUrls = []
+      globalThis.updateProbeMode = 'trusted'
+      session.fromPartition('updates').protocol.handle('https', request => {
+        const url = new URL(request.url)
+        globalThis.updateProbeUrls.push(`${url.hostname}${url.pathname}`)
+        if (globalThis.updateProbeMode === 'untrusted') {
+          return new Response(null, { status: 302, headers: { location: 'https://evil.example/blocked' } })
+        }
+        if (globalThis.updateProbeMode === 'loop') {
+          return new Response(null, { status: 302, headers: { location: `https://api.github.com/loop-${globalThis.updateProbeUrls.length}` } })
+        }
+        if (url.pathname === '/repos/Tony9193/pdf-cross-probe/releases/latest') {
+          return new Response(null, { status: 302, headers: { location: 'https://api.github.com/test-release' } })
+        }
+        if (url.hostname === 'api.github.com' && url.pathname === '/test-release') {
+          return new Response(JSON.stringify({ tag_name: `v${version}`, draft: false, prerelease: false, assets: [] }),
+            { headers: { 'Content-Type': 'application/json' } })
+        }
+        return new Response('Unexpected request', { status: 404 })
+      })
+    }, configuration.version)
+    const status = await main.evaluate(() => window.pdfCrossProbeDesktop.checkForUpdates(true))
+    assert.equal(status.phase, 'up-to-date')
+    assert.deepEqual(await app.evaluate(() => globalThis.updateProbeUrls), [
+      'api.github.com/repos/Tony9193/pdf-cross-probe/releases/latest', 'api.github.com/test-release',
+    ])
+    await app.evaluate(() => { globalThis.updateProbeMode = 'untrusted'; globalThis.updateProbeUrls = [] })
+    assert.equal((await main.evaluate(() => window.pdfCrossProbeDesktop.checkForUpdates(true))).phase, 'error')
+    assert.deepEqual(await app.evaluate(() => globalThis.updateProbeUrls), ['api.github.com/repos/Tony9193/pdf-cross-probe/releases/latest'])
+    await app.evaluate(() => { globalThis.updateProbeMode = 'loop'; globalThis.updateProbeUrls = [] })
+    assert.equal((await main.evaluate(() => window.pdfCrossProbeDesktop.checkForUpdates(true))).phase, 'error')
+    assert.equal((await app.evaluate(() => globalThis.updateProbeUrls)).length, 6)
+  } finally {
+    await app?.close()
+    rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
+  }
+})
+
+test('desktop updater verifies and downloads signed releases through redirects, rate limits and cancellation', { timeout: 120000 }, async () => {
+  const configuration = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  const packaged = path.resolve(process.env.PDF_TEST_EXECUTABLE ?? path.join(configuration.build.directories.output, 'win-unpacked/PDF Cross Probe.exe'))
+  const executablePath = !process.env.PDF_TEST_SOURCE && existsSync(packaged) ? packaged : undefined
+  const temporary = mkdtempSync(path.join(tmpdir(), 'pdf-update-electron-'))
+  const target = path.join(temporary, 'viewer')
+  mkdirSync(target)
+  writeFileSync(path.join(target, 'PDF Cross Probe.exe'), 'old application')
+  const keys = generateKeyPairSync('ed25519')
+  const hash = value => createHash('sha256').update(value).digest('hex')
+  const asarSource = path.join(temporary, 'asar-source'), asarFile = path.join(temporary, 'fixture.asar')
+  mkdirSync(asarSource)
+  writeFileSync(path.join(asarSource, 'index.js'), 'new resources')
+  await createRequire(import.meta.url)('@electron/asar').createPackage(asarSource, asarFile)
+  const contents = { 'PDF Cross Probe.exe': Buffer.from('new application'), 'resources/app.asar': readFileSync(asarFile) }
+  const archive = zipSync(contents)
+  const manifest = { schema: 1, version: '99.0.0', platform: 'win32', arch: 'x64',
+    asset: 'PDF-Cross-Probe-99.0.0-win-x64.zip', size: archive.length, sha256: hash(archive),
+    files: Object.entries(contents).map(([name, value]) => ({ path: name, size: value.length, sha256: hash(value) })) }
+  const envelope = { manifest, signature: sign(null, Buffer.from(JSON.stringify(manifest)), keys.privateKey).toString('base64') }
+  const publicKey = keys.publicKey.export({ type: 'spki', format: 'der' }).toString('base64')
+  const release = { tag_name: 'v99.0.0', draft: false, prerelease: false, assets: [
+    { name: 'update-manifest.json', state: 'uploaded', size: 4096,
+      browser_download_url: 'https://github.com/Tony9193/pdf-cross-probe/releases/download/v99.0.0/update-manifest.json' },
+    { name: manifest.asset, state: 'uploaded', size: manifest.size, digest: `sha256:${manifest.sha256}`,
+      browser_download_url: `https://github.com/Tony9193/pdf-cross-probe/releases/download/v99.0.0/${manifest.asset}` },
+  ] }
+  const env = { ...process.env, PDF_CROSS_PROBE_MOCK_REGISTRY: '1' }
+  delete env.ELECTRON_RUN_AS_NODE
+  let app
+  try {
+    const args = [...(executablePath ? [] : [path.resolve('.')]), `--user-data-dir=${path.join(temporary, 'profile')}`]
+    app = await _electron.launch({ executablePath, args, env, timeout: 60000 })
+    const main = await app.firstWindow()
+    await main.getByRole('heading', { name: 'PDF 联动查看器', exact: true }).waitFor({ timeout: 30000 })
+    await app.evaluate(({ session }, fixture) => {
+      globalThis.updateFixture = fixture
+      globalThis.updateRequests = []
+      globalThis.updateMode = 'normal'
+      globalThis.updateArchiveStarted = null
+      session.fromPartition('updates').protocol.handle('https', request => {
+        const url = new URL(request.url)
+        globalThis.updateRequests.push(`${url.hostname}${url.pathname}`)
+        if (url.hostname === 'api.github.com' && url.pathname.endsWith('/releases/latest')) {
+          return globalThis.updateMode === 'fallback'
+            ? new Response('rate limited', { status: 403 })
+            : new Response(JSON.stringify(fixture.release), { headers: { 'Content-Type': 'application/json' } })
+        }
+        if (url.hostname === 'github.com' && url.pathname.endsWith('/releases/latest')) {
+          return new Response(null, { status: 302, headers: { location: 'https://github.com/Tony9193/pdf-cross-probe/releases/tag/v99.0.0' } })
+        }
+        if (url.hostname === 'github.com' && url.pathname.endsWith('/update-manifest.json')) {
+          return new Response(null, { status: 302, headers: { location: 'https://release-assets.githubusercontent.com/test-manifest' } })
+        }
+        if (url.hostname === 'release-assets.githubusercontent.com' && url.pathname === '/test-manifest') {
+          const value = structuredClone(fixture.envelope)
+          if (globalThis.updateMode === 'tampered') value.manifest.sha256 = '0'.repeat(64)
+          return new Response(JSON.stringify(value), { headers: { 'Content-Type': 'application/json' } })
+        }
+        if (url.hostname === 'github.com' && url.pathname.endsWith('.zip')) {
+          return new Response(null, { status: 302, headers: { location: 'https://release-assets.githubusercontent.com/test-archive' } })
+        }
+        if (url.hostname === 'release-assets.githubusercontent.com' && url.pathname === '/test-archive') {
+          if (globalThis.updateMode === 'cancel') {
+            return new Response(new ReadableStream({ start(controller) {
+              controller.enqueue(Uint8Array.from(fixture.archive.slice(0, 8)))
+              globalThis.updateArchiveStarted?.()
+            } }))
+          }
+          return new Response(Uint8Array.from(fixture.archive))
+        }
+        return new Response('Unexpected request', { status: 404 })
+      })
+    }, { envelope, release, archive: [...archive] })
+    for (const mode of ['normal', 'fallback', 'tampered', 'cancel']) {
+      const result = await app.evaluate(async ({ app, net, session }, options) => {
+        globalThis.updateMode = options.mode
+        globalThis.updateRequests = []
+        const createRequire = process.getBuiltinModule('module').createRequire
+        const path = process.getBuiltinModule('path')
+        const requireFromApp = createRequire(path.join(app.getAppPath(), 'package.json'))
+        const modulePath = app.isPackaged ? 'dist/desktop/updater.cjs' : 'electron/updater.cjs'
+        const { createUpdater, createElectronFetch, fileHash } = requireFromApp(path.join(app.getAppPath(), modulePath))
+        const updater = createUpdater({ version: '1.0.0', packaged: true, platform: 'win32', arch: 'x64',
+          publicKey: options.publicKey, userData: path.join(options.temporary, `profile-${options.mode}`),
+          executablePath: path.join(options.target, 'PDF Cross Probe.exe'), fetch: createElectronFetch(net, session.fromPartition('updates')) })
+        const check = await updater.check(true)
+        let download = null
+        if (check.phase === 'available' && options.mode === 'cancel') {
+          const started = new Promise(resolve => { globalThis.updateArchiveStarted = resolve })
+          const operation = updater.download()
+          await started
+          updater.cancel()
+          download = await operation
+        } else if (check.phase === 'available') download = await updater.download()
+        let stagedAsarHash = null
+        if (download?.phase === 'ready') {
+          const names = await process.getBuiltinModule('fs').promises.readdir(options.temporary)
+          const stage = names.find(name => name.startsWith('.pdf-update-'))
+          stagedAsarHash = await fileHash(path.join(options.temporary, stage, 'resources', 'app.asar'))
+        }
+        const urls = [...globalThis.updateRequests]
+        await updater.dispose()
+        return { check: check.phase, version: check.version, download: download?.phase ?? null, stagedAsarHash, urls }
+      }, { mode, publicKey, temporary, target })
+      if (mode === 'tampered') {
+        assert.equal(result.check, 'error')
+        assert.equal(result.download, null)
+        assert.ok(!result.urls.some(url => url.endsWith('/test-archive')))
+      } else {
+        assert.equal(result.check, 'available')
+        assert.equal(result.version, '99.0.0')
+        assert.equal(result.download, mode === 'cancel' ? 'available' : 'ready', JSON.stringify({ mode, ...result }))
+        if (mode !== 'cancel') assert.equal(result.stagedAsarHash, hash(contents['resources/app.asar']))
+        assert.ok(result.urls.includes('release-assets.githubusercontent.com/test-manifest'))
+        assert.ok(result.urls.includes('release-assets.githubusercontent.com/test-archive'))
+        if (mode === 'fallback') assert.ok(result.urls.includes('github.com/Tony9193/pdf-cross-probe/releases/latest'))
+      }
+      assert.equal(readFileSync(path.join(target, 'PDF Cross Probe.exe'), 'utf8'), 'old application')
+    }
+  } finally {
+    await app?.close()
+    rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
+  }
+})
+
+test('packaged desktop completes signed download and installation handoff', {
+  timeout: 240000, skip: process.platform !== 'win32' || process.env.PDF_TEST_FULL_UPDATE !== '1',
+}, async () => {
+  const configuration = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  const release = path.resolve(configuration.build.directories.output)
+  const source = path.join(release, 'win-unpacked')
+  const envelope = JSON.parse(readFileSync(path.join(release, 'update-manifest.json'), 'utf8'))
+  const archive = path.join(release, envelope.manifest.asset)
+  const temporary = mkdtempSync(path.join(tmpdir(), 'PDF 完整更新测试 '))
+  const target = path.join(temporary, 'viewer'), profile = path.join(temporary, 'profile')
+  cpSync(source, target, { recursive: true })
+  writeFileSync(path.join(target, 'local-note.txt'), 'preserve local file')
+  const env = { ...process.env, PDF_CROSS_PROBE_MOCK_REGISTRY: '1' }
+  delete env.ELECTRON_RUN_AS_NODE
+  let runner, statusPath, launchedPid, helperPid
+  try {
+    mkdirSync(profile)
+    const configPath = path.join(temporary, 'driver-config.json')
+    const driverStatus = path.join(temporary, 'driver-status.json')
+    writeFileSync(configPath, JSON.stringify({ target, profile, envelope, archive, driverStatus }))
+    runner = spawn(path.resolve('node_modules/electron/dist/electron.exe'),
+      [path.resolve('tests/update-electron-driver.cjs'), configPath], { env, windowsHide: true, stdio: 'ignore' })
+    const [exitCode] = await once(runner, 'exit')
+    assert.equal(exitCode, 0, existsSync(driverStatus) ? readFileSync(driverStatus, 'utf8') : 'Update driver exited before reporting status')
+    runner = null
+    const result = JSON.parse(readFileSync(driverStatus, 'utf8'))
+    assert.deepEqual(result, { checked: 'available', downloaded: 'ready', installing: 'installing' })
+    const jobs = readdirSync(path.join(profile, 'updates')).filter(name => name.startsWith('job-'))
+    assert.equal(jobs.length, 1)
+    const work = path.join(profile, 'updates', jobs[0])
+    statusPath = path.join(work, 'result.json')
+    const completion = new Promise((resolve, reject) => {
+      let watcher, timer
+      const observed = []
+      const finish = (error, value) => {
+        watcher?.close()
+        clearTimeout(timer)
+        if (error) reject(error)
+        else resolve(value)
+      }
+      const check = () => {
+        try {
+          const value = JSON.parse(readFileSync(statusPath, 'utf8'))
+          if (observed.at(-1) !== value.phase) observed.push(value.phase)
+          if (['installed', 'rolled-back', 'recovery-needed'].includes(value.phase)) finish(null, value)
+        } catch {}
+      }
+      watcher = watch(work, check)
+      timer = setTimeout(() => finish(new Error(`Update installation did not finish: ${JSON.stringify(observed)}`)), 120000)
+      check()
+    })
+    const installed = await completion
+    launchedPid = installed.pid
+    helperPid = installed.helperPid
+    assert.equal(installed.phase, 'installed', JSON.stringify(installed))
+    assert.equal(readFileSync(path.join(target, 'local-note.txt'), 'utf8'), 'preserve local file')
+    const sessionCheck = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+      `$viewer = Get-Process -Id ${Number(launchedPid)}; $current = Get-Process -Id $PID; if ($viewer.SessionId -eq $current.SessionId) { exit 0 } else { exit 1 }`],
+    { stdio: 'ignore', windowsHide: true, timeout: 15000 })
+    assert.equal(sessionCheck.status, 0, 'The restarted viewer must remain in the current desktop session')
+    const asar = createRequire(import.meta.url)('@electron/asar')
+    const installedVersion = JSON.parse(asar.extractFile(path.join(target, 'resources', 'app.asar'), 'package.json').toString('utf8')).version
+    assert.equal(installedVersion, configuration.version)
+    console.log(JSON.stringify({ signedDownload: 'verified', installerHandoff: 'completed', healthyVersion: installedVersion,
+      simulatedPreviousVersion: '1.0.0', preservedLocalFile: true }))
+  } finally {
+    if (runner && runner.exitCode === null) runner.kill()
+    if (!launchedPid && statusPath && existsSync(statusPath)) {
+      try {
+        const status = JSON.parse(readFileSync(statusPath, 'utf8'))
+        launchedPid = status.pid
+        helperPid = status.helperPid
+      } catch {}
+    }
+    if (launchedPid) spawnSync('taskkill.exe', ['/PID', String(launchedPid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
+    if (helperPid) spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+      `$helper = Get-Process -Id ${Number(helperPid)} -ErrorAction SilentlyContinue; if ($helper) { $helper.WaitForExit(30000) | Out-Null }`],
+    { stdio: 'ignore', windowsHide: true, timeout: 35000 })
+    rmSync(temporary, { recursive: true, force: true, maxRetries: 20, retryDelay: 200 })
+  }
+})
 
 test('desktop loads PDFs offline and links native windows from a portable path', { timeout: 180000 }, async () => {
   const pdf = await PDFDocument.create()

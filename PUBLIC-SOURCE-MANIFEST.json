@@ -1,5 +1,5 @@
 {
-  "version": "1.1.2",
+  "version": "1.1.4",
   "files": [
     {
       "file": ".gitignore",
@@ -15,15 +15,15 @@
     },
     {
       "file": "README.md",
-      "sha256": "713801d823173bbc5face08164973ed09763d7089a22b6f133dad6553a211f61"
+      "sha256": "ae7e0c56059e9faf2a04f2ecb65040ed6214165e5d7f117df7dfda98263c334c"
     },
     {
       "file": "electron/install-update.ps1",
-      "sha256": "f808d42085fe63ce0e223060ec934ac0e1733a3a4db539022ee3ee53c9beedca"
+      "sha256": "34ef443e1654b2dceb557588d779ecf9d38f837c87f87bcfbfac98e1cc52f314"
     },
     {
       "file": "electron/main.cjs",
-      "sha256": "1b38144e8c0e38dcccac8a83ce3a08d46fcb13d784214bfe71213cb4ee778bd6"
+      "sha256": "2c45b3cab8e05fa868bee83023c2e7657b7dd916cfc4e6cf01ae774e71346cf4"
     },
     {
       "file": "electron/preload.cjs",
@@ -31,7 +31,7 @@
     },
     {
       "file": "electron/update-core.cjs",
-      "sha256": "20a35e15ceea7e69400b6f28d8822df7c9d5759e9d3ad4864e43a80dbbf79782"
+      "sha256": "f721cd18e8d96c48dd964cb9e458e2cc48f10f8ff8a91363672ce88a835e1046"
     },
     {
       "file": "electron/update-key.cjs",
@@ -39,7 +39,7 @@
     },
     {
       "file": "electron/updater.cjs",
-      "sha256": "a101597fb0966b02154beb5be12fd95ec1d9df00cde5517c5e764774005b45fd"
+      "sha256": "92a38344afff494c674e9ec2078098d889eb612f307b2882fc24f6021dd0ebe1"
     },
     {
       "file": "index.html",
@@ -47,15 +47,15 @@
     },
     {
       "file": "package-lock.json",
-      "sha256": "3f435c32920ed06225f1253fb11406baab8fc9b278a04f2baff6069ad25fa08e"
+      "sha256": "a916b13bb49fe44bebdf7007ce941cae7df229a30a6cc6845032039b74c72bfd"
     },
     {
       "file": "package.json",
-      "sha256": "4bd155f852cb0e4e420e76964d9fe24c6138c262b7cdc6d1da020941bfdd31a1"
+      "sha256": "b6fb3be1faf85a8d3326c94fe1b3f22a3865bba71806c4f9d6c2fee9ca96428e"
     },
     {
       "file": "portable/README.txt",
-      "sha256": "6626396c471899fc922e01b8d1cc82a31507fef4dbf350c47d65d36c8d40ef77"
+      "sha256": "ff6a5a9670308007af84d3cfac37236f045df73e78b345d2afd09c876d37a9f1"
     },
     {
       "file": "portable/Start.cmd",
@@ -75,7 +75,7 @@
     },
     {
       "file": "scripts/build-desktop.mjs",
-      "sha256": "5252de4a5ab6dfdda54baebf9098c702e52a4eaee952dbac43b5a12b15a507f3"
+      "sha256": "9201ef2a16b80ded7364d03339c4996f0ed63284e7b9e57e485a35309644d5fe"
     },
     {
       "file": "scripts/export-public.mjs",
@@ -99,7 +99,7 @@
     },
     {
       "file": "src/PdfPane.tsx",
-      "sha256": "7e5579ad542d05cd38313fa75da90c7e726e2d3287e37f4f64374ed7687cc06d"
+      "sha256": "3ee5fc6d1c18098cff9a8b69d512ed191629b1151b6f651752ece37cb3b84ed1"
     },
     {
       "file": "src/index.css",
@@ -123,7 +123,7 @@
     },
     {
       "file": "tests/electron.test.mjs",
-      "sha256": "d4bf22a656ced66df9de89566e829dae1dd55d6467f498d59e03e3681396c32e"
+      "sha256": "07738499f11d894a9ac520b23b38f57ff40903194430c6366f0ebf8ac4cc4cc8"
     },
     {
       "file": "tests/encrypted-fixture.mjs",
@@ -146,12 +146,16 @@
       "sha256": "f848633cd4b7a4cc6d397afadefc9278265876b0938e855c2c15da58bb990d0c"
     },
     {
+      "file": "tests/update-electron-driver.cjs",
+      "sha256": "27682b158988cae68f5656c47207e34cb0c37751f44d7632f3b4e3b811ef505e"
+    },
+    {
       "file": "tests/updater.test.mjs",
-      "sha256": "918339440860bc4f5885e3378840456bd484ed03e4fac1436d9bfa739e8e1733"
+      "sha256": "149313003f33ff62d8b584005f274f98619be36a4d91f1bf970d85756b71cefe"
     },
     {
       "file": "tests/viewer.test.mjs",
-      "sha256": "7ab426e908a59416d5f1498e2ce5be4ac7b1ca10d749dc56601fac5f434a8a99"
+      "sha256": "cc6c789374e27a411f25f18592d8e380a3124281bb978749bb89029d4c47470a"
     },
     {
       "file": "tsconfig.app.json",
