@@ -5,7 +5,7 @@ import { ArrowLeftRight, ArrowUpCircle, Check, ChevronLeft, ChevronRight, Column
 import PdfPane from './PdfPane'
 import type { ColoredMatch, Navigation, PasswordPrompt, TextSelection } from './PdfPane'
 import { createPdfTask, indexPage } from './pdf'
-import type { DocumentSession } from './pdf'
+import type { DocumentSession, PageIndex } from './pdf'
 import { DocumentSearchIndex, nextMatchIndex, splitKeywords } from './search'
 import type { SearchResult } from './search'
 import type { ReadingMode, ViewSnapshot } from './reading'
@@ -105,6 +105,7 @@ type UpdateStatus = { phase: string; currentVersion: string; version?: string; n
   progress?: number; received?: number; total?: number; releasePage?: string }
 type DesktopBridge = {
   isDesktop: boolean
+  getCacheBudget?: () => Promise<number | null>
   openNewWindow: () => Promise<void>
   getUpdateStatus: () => Promise<UpdateStatus>
   checkForUpdates: (manual?: boolean) => Promise<UpdateStatus>
@@ -129,12 +130,46 @@ declare global {
 type Term = { id: string; value: string; color: string }
 type DocumentInfo = { id: string; name: string; bytes: Uint8Array; password?: string }
 type SharedState = { terms: Term[]; dim: boolean; tolerant: boolean[]; settings?: AppSettings }
-type DocumentMetadata = { id: string; name: string; indexed: number; ready: boolean; waitingPassword?: boolean; texts: string[]; padReferenceBoundaries?: number[][] }
-type RemoteDocument = { id: string; name: string; indexed: number; ready: boolean; waitingPassword?: boolean; search: DocumentSearchIndex }
+type DocumentMetadata = { id: string; name: string; indexed: number; indexFailures?: number; ready: boolean; waitingPassword?: boolean; texts: string[]; padReferenceBoundaries?: number[][] }
+type LeftIndexUpdate = DocumentSession | Omit<DocumentMetadata, 'texts' | 'padReferenceBoundaries'> | null
+type LeftIndexDelta = { id: string; from: number; indexFailures?: number; pages: { text: string; boundaries?: number[] }[]; ready: boolean }
+
+function termKey(value: string) {
+  return value.normalize('NFKC').trim().toUpperCase()
+}
+
+function PageLinks({ counts, term, onPage }: { counts: Map<number, number>; term: string; onPage: (page: number) => void }) {
+  const [offset, setOffset] = useState(0)
+  const size = 40
+  const start = Math.min(offset, Math.max(0, Math.ceil(counts.size / size) - 1) * size)
+  if (!counts.size) return null
+  return <div className="page-links">
+    {start > 0 && <button type="button" onClick={() => setOffset(start - size)}>上一组</button>}
+    {Array.from(counts).slice(start, start + size).map(([page, count]) => <button type="button" key={page} title={`${term} · 第 ${page} 页`} onClick={() => onPage(page)}>p.{page}<span>{count}</span></button>)}
+    {start + size < counts.size && <button type="button" onClick={() => setOffset(start + size)}>下一组</button>}
+  </div>
+}
+type RemoteDocument = { id: string; name: string; indexed: number; indexFailures?: number; ready: boolean; waitingPassword?: boolean; search: DocumentSearchIndex }
 type MatchPosition = { documentId: string; index: number; mode: SearchResult['mode'] }
 type FocusTarget = { slot: number; termId: string; position: MatchPosition; navigation: Navigation; active?: boolean }
 
 function App() {
+  const [windowCachePixels, setWindowCachePixels] = useState<number | null>(null)
+  useEffect(() => {
+    const readBudget = window.pdfCrossProbeDesktop?.getCacheBudget
+    if (!readBudget) return
+    let active = true, timer = 0
+    const sample = async () => {
+      try {
+        const pixels = await readBudget()
+        if (active) setWindowCachePixels(pixels)
+      } catch (error) {
+        if (active) { console.warn('PDF cache budget unavailable:', error); setWindowCachePixels(null) }
+      } finally { if (active) timer = window.setTimeout(sample, 5000) }
+    }
+    void sample()
+    return () => { active = false; clearTimeout(timer) }
+  }, [])
   const detached = new URLSearchParams(location.search).get('panel') === 'right'
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings())
   const settingsRef = useRef(settings)
@@ -172,6 +207,7 @@ function App() {
   const pendingFilesRef = useRef<(DocumentInfo | null)[]>([null, null])
   const readRequests = useRef(['', ''])
   const pendingFocus = useRef<FocusTarget[]>([])
+  const pendingSourceRef = useRef<{ documentId: string; slot: number; termId: string; selection: TextSelection } | null>(null)
   const viewsRef = useRef<(ViewSnapshot | null)[]>([null, null])
   const [errors, setErrors] = useState(['', '']), [loading, setLoading] = useState([false, false])
   const [passwordPrompts, setPasswordPrompts] = useState<(PasswordPrompt | null)[]>([null, null])
@@ -189,7 +225,10 @@ function App() {
   const [dragHint, setDragHint] = useState<0 | 1 | null>(null)
   const [transitioningSlot, setTransitioningSlot] = useState<0 | 1 | null>(null)
   const transitionTimerRef = useRef(0)
-  const dividerDragRef = useRef<{ pointerId: number; originSplit: number; fromCollapsed: 0 | 1 | null; startX: number; startY: number; moved: boolean } | null>(null)
+  const dividerDragRef = useRef<{ pointerId: number; originSplit: number; finalSplit: number; axis: 'horizontal' | 'vertical'; fromCollapsed: 0 | 1 | null; startX: number; startY: number; moved: boolean } | null>(null)
+  const leftIndexRef = useRef<LeftIndexUpdate>(null)
+  const indexReceiver = useRef(false)
+  const resyncPending = useRef(false)
   const suppressTabClickRef = useRef(false)
   const panesRef = useRef<HTMLDivElement>(null)
   const [navigation, setNavigation] = useState<(Navigation | null)[]>([null, null])
@@ -235,8 +274,27 @@ function App() {
     if (session) for (const term of terms) values.set(term.id, searchResult(session, term, slot))
     return values
   }), [documents, remoteLeft, terms, tolerant])
-  const colored = useMemo(() => results.map(result => terms.flatMap(term =>
-    (result.get(term.id)?.matches ?? []).map(match => ({ ...match, term: term.value, color: term.color } as ColoredMatch)))), [results, terms])
+  const { colored, pageCounts } = useMemo(() => {
+    const colored = results.map(() => ({ byPage: new Map<number, ColoredMatch[]>(), count: 0 }))
+    const pageCounts = results.map((result, slot) => new Map(terms.map(term => {
+      const counts = new Map<number, number>()
+      for (const match of result.get(term.id)?.matches ?? []) {
+        counts.set(match.page, (counts.get(match.page) ?? 0) + 1)
+        const group = colored[slot].byPage.get(match.page) ?? []
+        if (!group.length) colored[slot].byPage.set(match.page, group)
+        group.push({ ...match, term: term.value, color: term.color })
+        colored[slot].count++
+      }
+      return [term.id, counts]
+    })))
+    return { colored, pageCounts }
+  }, [results, terms])
+
+  function canApplyFocus(document: DocumentSession | RemoteDocument | null, target: FocusTarget) {
+    if (document?.id !== target.position.documentId) return false
+    if (target.position.mode === 'tolerant' && !stateRef.current.tolerant[target.slot] && !document.ready) return false
+    return document.ready || document.indexed >= target.navigation.match.page
+  }
 
   function applyFocus(targets: FocusTarget[]) {
     const next = [...navigationRef.current]
@@ -245,8 +303,8 @@ function App() {
       if (!termsRef.current.some(term => term.id === target.termId)) continue
       pendingFocus.current = pendingFocus.current.filter(value => value.slot !== target.slot || value.termId !== target.termId)
       const document = statsRef.current[target.slot]
-      // 跨窗口定位可能先于文档及索引到达；按文档 ID 暂存，等对应索引就绪后再应用。
-      if (document?.id !== target.position.documentId || !document.ready) {
+      // 跨窗口定位可能先于文档及目标页索引到达；按文档 ID 与页进度暂存，就绪后再应用。
+      if (!canApplyFocus(document, target)) {
         pendingFocus.current.push(target)
         continue
       }
@@ -303,8 +361,9 @@ function App() {
   function setKeywordState(next: Term[]) {
     const allowed = new Set(next.map(term => term.id))
     if (activeTermIdRef.current && !allowed.has(activeTermIdRef.current)) activeTermIdRef.current = next.at(-1)?.id ?? null
+    if (pendingSourceRef.current && !allowed.has(pendingSourceRef.current.termId)) pendingSourceRef.current = null
     const updated = Object.fromEntries(Object.entries(positionsRef.current).filter(([key]) => allowed.has(key.slice(key.indexOf(':') + 1))))
-    const navigation = navigationRef.current.map(value => value && next.some(term => term.value === value.term) ? value : null)
+    const navigation = navigationRef.current.map(value => value && next.some(term => termKey(term.value) === termKey(value.term)) ? value : null)
     pendingFocus.current = pendingFocus.current.filter(target => allowed.has(target.termId))
     termsRef.current = next; positionsRef.current = updated; navigationRef.current = navigation
     stateRef.current = { ...stateRef.current, terms: next }
@@ -337,34 +396,75 @@ function App() {
   function addTerms(values: string[], source?: { slot: number; selection: TextSelection }) {
     const next = [...termsRef.current]
     for (const value of values) {
-      if (!next.some(term => term.value.toUpperCase() === value.toUpperCase())) next.push({ id: crypto.randomUUID(), value, color: palette[colorCounter.current++ % palette.length] })
+      if (!next.some(term => termKey(term.value) === termKey(value))) next.push({ id: crypto.randomUUID(), value, color: palette[colorCounter.current++ % palette.length] })
     }
     setKeywordState(next)
-    const focus = next.find(term => term.value.toUpperCase() === values.at(-1)?.toUpperCase())?.id ?? null
+    const lastValue = values.at(-1)
+    const focus = lastValue ? next.find(term => termKey(term.value) === termKey(lastValue))?.id ?? null : null
     activeTermIdRef.current = focus
+    if (focus && source) {
+      const sourceSession = statsRef.current[source.slot]
+      pendingSourceRef.current = sourceSession && !sourceSession.ready && sourceSession.indexed < source.selection.page
+        ? { documentId: sourceSession.id, slot: source.slot, termId: focus, selection: source.selection }
+        : null
+    } else pendingSourceRef.current = null
     const targets = focus ? locate(focus, undefined, undefined, undefined, source) : []
     broadcast({ ...stateRef.current, terms: next }, targets)
   }
 
   function metadata(session: DocumentSession): DocumentMetadata {
-    return { id: session.id, name: session.name, indexed: session.indexed, ready: session.ready, texts: session.pages.map(page => page.text),
-      padReferenceBoundaries: session.pages.map(page => page.padReferenceBoundaries ?? []) }
+    const pages = session.pages.slice(0, session.indexed)
+    return { id: session.id, name: session.name, indexed: session.indexed, indexFailures: session.indexFailures, ready: session.ready,
+      texts: pages.map(page => page.text), padReferenceBoundaries: pages.map(page => page.padReferenceBoundaries ?? []) }
+  }
+
+  function leftSnapshot(value = leftIndexRef.current): DocumentMetadata | null {
+    return value && ('pdf' in value ? metadata(value) : { ...value, texts: [] })
+  }
+
+  function publishLeft(value: LeftIndexUpdate) {
+    const previous = leftIndexRef.current
+    leftIndexRef.current = value
+    if (!indexReceiver.current) return
+    if (value && 'pdf' in value && previous?.id === value.id && !('waitingPassword' in previous && previous.waitingPassword)) {
+      const from = previous.indexed
+      const delta: LeftIndexDelta = { id: value.id, from, indexFailures: value.indexFailures, ready: value.ready,
+        pages: value.pages.slice(from, value.indexed).map(page => ({ text: page.text, boundaries: page.padReferenceBoundaries })) }
+      channel.current?.postMessage({ type: 'left-delta', delta })
+    } else channel.current?.postMessage({ type: 'left-index', left: leftSnapshot(value) })
   }
 
   function receiveLeft(value: DocumentMetadata | null) {
     if (!detached) return
+    resyncPending.current = false
     const current = remoteLeftRef.current
     if (!value) {
-      remoteLeftRef.current = null; setRemoteLeft(null)
+      remoteLeftRef.current = null; statsRef.current = [null, documentsRef.current[1]]; setRemoteLeft(null)
       return
     }
     if (current?.id === value.id && current.indexed > value.indexed) return
     const search = current?.id === value.id ? current.search : new DocumentSearchIndex()
     const start = current?.id === value.id ? current.indexed : 0
     for (const [index, text] of value.texts.slice(start).entries()) search.append(text, value.padReferenceBoundaries?.[start + index])
-    const next = { id: value.id, name: value.name, indexed: value.indexed, ready: value.ready, waitingPassword: value.waitingPassword, search }
+    const next = { id: value.id, name: value.name, indexed: value.indexed, indexFailures: value.indexFailures, ready: value.ready, waitingPassword: value.waitingPassword, search }
     remoteLeftRef.current = next
     statsRef.current = [next, documentsRef.current[1]]
+    setRemoteLeft(next)
+  }
+
+  function receiveLeftDelta(delta: LeftIndexDelta) {
+    if (!detached) return
+    const current = remoteLeftRef.current
+    if (!current || current.id !== delta.id || current.indexed !== delta.from || !delta.pages.length || current.ready) {
+      if (!resyncPending.current) {
+        resyncPending.current = true
+        channel.current?.postMessage({ type: 'left-resync' })
+      }
+      return
+    }
+    for (const page of delta.pages) current.search.append(page.text, page.boundaries)
+    const next = { ...current, indexed: delta.from + delta.pages.length, indexFailures: delta.indexFailures ?? current.indexFailures, ready: delta.ready }
+    remoteLeftRef.current = next; statsRef.current = [next, documentsRef.current[1]]
     setRemoteLeft(next)
   }
 
@@ -387,7 +487,7 @@ function App() {
     navigationRef.current = nextNavigation; setNavigation(nextNavigation)
     setLoading(value => value.map((item, index) => index === slot ? true : item))
     setErrors(value => value.map((item, index) => index === slot ? '' : item))
-    if (slot === 0) channel.current?.postMessage({ type: 'left-index', left: { id, name, indexed: 0, ready: false, texts: [] } })
+    if (slot === 0) publishLeft({ id, name, indexed: 0, ready: false })
     try {
       await previous?.destroy()
       if (revisions.current[slot] !== revision) return
@@ -413,25 +513,45 @@ function App() {
         setLoading(value => value.map((item, index) => index === slot ? false : item))
         setErrors(value => value.map((item, index) => index === slot ? '' : item))
         setPasswordPrompts(value => value.map((item, index) => index === slot ? { id, name, incorrect, attempts } : item))
-        if (slot === 0) channel.current?.postMessage({ type: 'left-index', left: { id, name, indexed: 0, ready: false, waitingPassword: true, texts: [] } })
+        if (slot === 0) publishLeft({ id, name, indexed: 0, ready: false, waitingPassword: true })
       }
       const pdf = await task.promise
       if (revisions.current[slot] !== revision) { await pdf.loadingTask.destroy(); return }
       passwordCallbacks.current[slot] = null
       pendingFilesRef.current[slot] = null
       setPasswordPrompts(value => value.map((item, index) => index === slot ? null : item))
-      if (slot === 0) channel.current?.postMessage({ type: 'left-index', left: { id, name, indexed: 0, ready: false, waitingPassword: false, texts: [] } })
-      const session: DocumentSession = { id, name, bytes, password: passwordsRef.current[slot], pdf, pages: [], indexed: 0, ready: false, search: new DocumentSearchIndex() }
+      if (slot === 0) publishLeft({ id, name, indexed: 0, ready: false, waitingPassword: false })
+      let markInitialRaster: () => void = () => {}
+      const initialRaster = new Promise<void>(resolve => { markInitialRaster = resolve })
+      const retainedBytes = slot === 1 && !detached ? bytes : new Uint8Array(0)
+      const session: DocumentSession = { id, name, bytes: retainedBytes, password: passwordsRef.current[slot], pdf, pages: [], indexed: 0, indexFailures: 0, ready: false,
+        search: new DocumentSearchIndex(), markInitialRaster }
       setDocuments(value => value.map((item, index) => index === slot ? session : item))
+      setLoading(value => value.map((item, index) => index === slot ? false : item))
+      // Avoid contending with the first raster on the parser worker. Hidden or failed panes must still index.
+      let timeout = 0
+      await Promise.race([initialRaster, new Promise<void>(resolve => { timeout = window.setTimeout(resolve, 1800) })])
+      clearTimeout(timeout)
+      await new Promise<void>(resolve => setTimeout(resolve, 0))
       for (let page = 1; page <= pdf.numPages; page++) {
-        const indexedPage = await indexPage(pdf, page)
-        if (revisions.current[slot] !== revision) { await pdf.loadingTask.destroy(); return }
+        if (revisions.current[slot] !== revision) return
+        let indexedPage: PageIndex
+        try { indexedPage = await indexPage(pdf, page) }
+        catch (error) {
+          if (revisions.current[slot] !== revision) return
+          console.warn(`PDF text index failed on page ${page}:`, error)
+          indexedPage = { text: '', segments: [], error: `第 ${page} 页无法提取文字，仅查看` }
+          session.indexFailures++
+        }
+        if (revisions.current[slot] !== revision) return
         session.pages.push(indexedPage); session.indexed = page
         session.search.append(indexedPage.text, indexedPage.padReferenceBoundaries)
         if (page % 3 === 0 || page === pdf.numPages) {
-          const snapshot = { ...session, pages: [...session.pages], ready: page === pdf.numPages }
+          // The loader only appends pages; indexed marks the published prefix for this snapshot.
+          const snapshot = { ...session, ready: page === pdf.numPages }
           setDocuments(value => value.map((item, index) => index === slot ? snapshot : item))
-          if (slot === 0) channel.current?.postMessage({ type: 'left-index', left: metadata(snapshot) })
+          if (slot === 0) publishLeft(snapshot)
+          if (!snapshot.ready) await new Promise<void>(resolve => setTimeout(resolve, 0))
         }
       }
     } catch (error) {
@@ -445,7 +565,7 @@ function App() {
         setPasswordPrompts(value => value.map((item, index) => index === slot ? null : item))
         setErrors(value => value.map((item, index) => index === slot ? error instanceof Error ? error.message : String(error) : item))
         setDocuments(value => value.map((item, index) => index === slot ? null : item))
-        if (slot === 0) channel.current?.postMessage({ type: 'left-index', left: null })
+        if (slot === 0) publishLeft(null)
       }
     } finally {
       if (revisions.current[slot] === revision) setLoading(value => value.map((item, index) => index === slot ? false : item))
@@ -467,7 +587,7 @@ function App() {
     setLoading(value => value.map((item, index) => index === slot ? true : item))
     if (slot === 0 && readRequests.current[0]) {
       const pendingName = pendingFilesRef.current[0]?.name ?? ''
-      channel.current?.postMessage({ type: 'left-index', left: { id: readRequests.current[0], name: pendingName, indexed: 0, ready: false, waitingPassword: false, texts: [] } })
+      publishLeft({ id: readRequests.current[0], name: pendingName, indexed: 0, ready: false, waitingPassword: false })
     }
     callback(password)
   }
@@ -485,7 +605,7 @@ function App() {
     setPasswordPrompts(value => value.map((item, index) => index === slot ? null : item))
     setLoading(value => value.map((item, index) => index === slot ? false : item))
     setErrors(value => value.map((item, index) => index === slot ? '' : item))
-    if (slot === 0) channel.current?.postMessage({ type: 'left-index', left: null })
+    if (slot === 0) publishLeft(null)
     if (slot === 1 && notify && id) channel.current?.postMessage({ type: 'cancel-file', id })
     void currentTask?.destroy().catch(() => {})
   }
@@ -500,6 +620,7 @@ function App() {
     positionsRef.current = Object.fromEntries(Object.entries(positionsRef.current).filter(([key]) => !key.startsWith(`${slot}:`)))
     setPositions(positionsRef.current)
     pendingFocus.current = pendingFocus.current.filter(value => value.slot !== slot)
+    if (pendingSourceRef.current?.slot === slot) pendingSourceRef.current = null
     viewsRef.current[slot] = null
     if (notify && slot === 1) channel.current?.postMessage({ type: 'close-file', id })
   }
@@ -683,11 +804,11 @@ function App() {
     communication.onmessage = event => {
       const message = event.data
       if (message.type === 'ready' && !detached) {
+        indexReceiver.current = true
         setSeparated(true)
-        const left = documentsRef.current[0], right = documentsRef.current[1]
+        const right = documentsRef.current[1]
         const rightFile: DocumentInfo | null = right ? { id: right.id, name: right.name, bytes: right.bytes, password: right.password } : pendingFilesRef.current[1]
-        const promptA = passwordPromptsRef.current[0]
-        communication.postMessage({ type: 'state', state: { ...stateRef.current, settings: settingsRef.current }, left: left ? metadata(left) : (promptA ? { id: promptA.id, name: promptA.name, indexed: 0, ready: false, waitingPassword: true, texts: [] } : null), right: rightFile, rightView: viewsRef.current[1], targets: snapshotFocus() })
+        communication.postMessage({ type: 'state', state: { ...stateRef.current, settings: settingsRef.current }, left: leftSnapshot(), right: rightFile, rightView: viewsRef.current[1], targets: snapshotFocus() })
       } else if (message.type === 'state') {
         const state = message.state as SharedState
         setKeywordState(state.terms); stateRef.current = state
@@ -707,8 +828,10 @@ function App() {
       else if (message.type === 'cancel-file' && readRequests.current[1] === message.id) cancelPassword(1, false)
       else if (message.type === 'close-file' && (documentsRef.current[1]?.id ?? readRequests.current[1]) === message.id) closeDocument(1, false)
       else if (message.type === 'left-index') receiveLeft(message.left)
+      else if (message.type === 'left-delta') receiveLeftDelta(message.delta)
+      else if (message.type === 'left-resync' && !detached && indexReceiver.current) communication.postMessage({ type: 'left-index', left: leftSnapshot() })
       else if (message.type === 'view') viewsRef.current[message.slot] = message.view
-      else if (message.type === 'closed' && !detached) setSeparated(false)
+      else if (message.type === 'closed' && !detached) { indexReceiver.current = false; setSeparated(false) }
       else if (message.type === 'restore' && detached) window.close()
       else if (message.type === 'focus') {
         if (message.targets) applyFocus(message.targets)
@@ -789,8 +912,8 @@ function App() {
         sendFocus(termId, undefined, undefined, event.shiftKey ? -1 : 1)
         return
       }
-      if (!editable && !event.ctrlKey && !event.metaKey && !event.altKey && !externalRequestRef.current && event.key.toLowerCase() === 'r') {
-        const slot = detached ? 1 : activeSlotRef.current
+      if (!editable && !event.ctrlKey && !event.metaKey && !event.altKey && !settingsOpen && !updateOpen && !externalRequestRef.current && event.key.toLowerCase() === 'r') {
+        const slot = detached ? 1 : separated ? 0 : collapsedPane !== null ? ((1 - collapsedPane) as 0 | 1) : activeSlotRef.current
         if (!documentsRef.current[slot]) return
         event.preventDefault()
         setRotationTriggers(current => current.map((v, idx) => idx === slot ? v + 1 : v))
@@ -798,7 +921,7 @@ function App() {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [settingsOpen, externalRequest?.requestId, externalConfirm, updateOpen, externalSubmitting])
+  }, [settingsOpen, externalRequest?.requestId, externalConfirm, updateOpen, externalSubmitting, separated, collapsedPane])
 
   useEffect(() => {
     for (const slot of [0, 1]) {
@@ -813,14 +936,24 @@ function App() {
       }
     }
     previousTolerance.current = tolerant
-    const readyTargets = pendingFocus.current.filter(target => statsRef.current[target.slot]?.ready && statsRef.current[target.slot]?.id === target.position.documentId)
+    const readyTargets = pendingFocus.current.filter(target => canApplyFocus(statsRef.current[target.slot], target))
     if (readyTargets.length) applyFocus(readyTargets)
-    const last = termsRef.current.at(-1)
-    if (last) for (const slot of [0, 1]) {
+    const activeId = (activeTermIdRef.current && termsRef.current.some(t => t.id === activeTermIdRef.current))
+      ? activeTermIdRef.current : termsRef.current.at(-1)?.id
+    const activeTerm = activeId ? termsRef.current.find(t => t.id === activeId) : undefined
+    if (activeId && activeTerm) for (const slot of [0, 1]) {
       const session = statsRef.current[slot]
-      if (session?.ready && navigationRef.current[slot]?.documentId !== session.id) locate(last.id, undefined, slot)
+      const positioned = positionsRef.current[`${slot}:${activeId}`]
+      if (session?.ready && positioned?.documentId !== session.id &&
+        (navigationRef.current[slot]?.documentId !== session.id || navigationRef.current[slot]?.term !== activeTerm.value)) {
+        const deferredSource = pendingSourceRef.current?.documentId === session.id &&
+          pendingSourceRef.current.slot === slot && pendingSourceRef.current.termId === activeId
+          ? { slot, selection: pendingSourceRef.current.selection } : undefined
+        if (deferredSource) pendingSourceRef.current = null
+        locate(activeId, undefined, slot, undefined, deferredSource)
+      }
     }
-  }, [documents[0]?.id, documents[0]?.ready, documents[1]?.id, documents[1]?.ready, remoteLeft?.id, remoteLeft?.ready, tolerant])
+  }, [documents[0]?.id, documents[0]?.indexed, documents[0]?.ready, documents[1]?.id, documents[1]?.indexed, documents[1]?.ready, remoteLeft?.id, remoteLeft?.indexed, remoteLeft?.ready, tolerant])
 
   useEffect(() => () => {
     window.clearTimeout(transitionTimerRef.current)
@@ -835,7 +968,7 @@ function App() {
   useEffect(() => {
     if (detached || !separated) return
     const timer = window.setInterval(() => {
-      if (childWindow.current?.closed) setSeparated(false)
+      if (childWindow.current?.closed) { indexReceiver.current = false; setSeparated(false) }
     }, 500)
     return () => clearInterval(timer)
   }, [detached, separated])
@@ -847,6 +980,7 @@ function App() {
   }
   function restore() {
     setCollapsedPane(null); setDragSplit(null); setDragHint(null)
+    indexReceiver.current = false
     channel.current?.postMessage({ type: 'restore' }); childWindow.current?.close(); setSeparated(false)
   }
   const visibleSlots = detached ? [1] : separated ? [0] : swapped ? [1, 0] : [0, 1]
@@ -875,7 +1009,7 @@ function App() {
     if (event.button !== 0) return
     if (fromCollapsed === null) event.currentTarget.focus({ preventScroll: true })
     event.currentTarget.setPointerCapture(event.pointerId)
-    dividerDragRef.current = { pointerId: event.pointerId, originSplit: split, fromCollapsed, startX: event.clientX, startY: event.clientY, moved: false }
+    dividerDragRef.current = { pointerId: event.pointerId, originSplit: split, finalSplit: split, axis: splitAxis, fromCollapsed, startX: event.clientX, startY: event.clientY, moved: false }
   }
   const moveDivider = (event: React.PointerEvent<HTMLElement>) => {
     const drag = dividerDragRef.current
@@ -894,6 +1028,10 @@ function App() {
     const releasePx = edgePx + 20
     const raw = drag.fromCollapsed !== null ? (coordinate / length) * 100 : ((coordinate - 5) / (length - 10)) * 100
     const clampedRaw = Math.max(0, Math.min(100, raw))
+    const rememberSplit = (value: number) => {
+      drag.finalSplit = value
+      setSplitSizes(current => current[drag.axis] === value ? current : { ...current, [drag.axis]: value })
+    }
     if (drag.fromCollapsed !== null) {
       const isStartEdge = drag.fromCollapsed === firstSlot
       const edgeDist = isStartEdge ? coordinate : length - coordinate
@@ -904,17 +1042,14 @@ function App() {
       if (edgeDist > releasePx) drag.fromCollapsed = null
       setCollapsedPane(null); setDragSplit(clampedRaw)
       setDragHint(clampedRaw < 15 ? firstSlot : clampedRaw > 85 ? secondSlot : null)
-      if (edgeDist > edgePx) {
-        const nextVal = Math.max(15, Math.min(85, clampedRaw))
-        setSplitSizes(current => { const next = { ...current, [splitAxis]: nextVal }; persistSplits(next); return next })
-      }
+      if (edgeDist > edgePx) rememberSplit(Math.max(15, Math.min(85, clampedRaw)))
       return
     }
     if (collapsedPane === firstSlot) {
       if (coordinate > releasePx) {
         const nextVal = Math.max(15, Math.min(85, clampedRaw))
         changeCollapsed(null); setDragSplit(clampedRaw); setDragHint(null)
-        setSplitSizes(current => { const next = { ...current, [splitAxis]: nextVal }; persistSplits(next); return next })
+        rememberSplit(nextVal)
       }
       return
     }
@@ -922,23 +1057,23 @@ function App() {
       if (length - coordinate > releasePx) {
         const nextVal = Math.max(15, Math.min(85, clampedRaw))
         changeCollapsed(null); setDragSplit(clampedRaw); setDragHint(null)
-        setSplitSizes(current => { const next = { ...current, [splitAxis]: nextVal }; persistSplits(next); return next })
+        rememberSplit(nextVal)
       }
       return
     }
     if (coordinate <= edgePx) {
       setDragHint(null); setDragSplit(null)
-      setSplitSizes(current => { const next = { ...current, [splitAxis]: drag.originSplit }; persistSplits(next); return next })
+      rememberSplit(drag.originSplit)
       changeCollapsed(firstSlot)
     } else if (length - coordinate <= edgePx) {
       setDragHint(null); setDragSplit(null)
-      setSplitSizes(current => { const next = { ...current, [splitAxis]: drag.originSplit }; persistSplits(next); return next })
+      rememberSplit(drag.originSplit)
       changeCollapsed(secondSlot)
     } else {
       const nextVal = Math.max(15, Math.min(85, clampedRaw))
       setDragSplit(clampedRaw)
       setDragHint(clampedRaw < 15 ? firstSlot : clampedRaw > 85 ? secondSlot : null)
-      setSplitSizes(current => { const next = { ...current, [splitAxis]: nextVal }; persistSplits(next); return next })
+      rememberSplit(nextVal)
     }
   }
   const stopDividerDrag = (event: React.PointerEvent<HTMLElement>) => {
@@ -946,7 +1081,7 @@ function App() {
     const drag = dividerDragRef.current
     if (!drag || drag.pointerId !== event.pointerId) return
     dividerDragRef.current = null
-    if (drag.moved && drag.fromCollapsed !== null && panesRef.current) {
+    if (event.type === 'pointerup' && drag.moved && drag.fromCollapsed !== null && panesRef.current) {
       const bounds = panesRef.current.getBoundingClientRect()
       const length = stacked ? bounds.height : bounds.width
       const coordinate = Math.max(0, Math.min(length, stacked ? event.clientY - bounds.top : event.clientX - bounds.left))
@@ -954,13 +1089,19 @@ function App() {
       const isStartEdge = drag.fromCollapsed === firstSlot
       const edgeDist = isStartEdge ? coordinate : length - coordinate
       if (edgeDist <= edgePx) {
-        setSplitSizes(current => { const next = { ...current, [splitAxis]: drag.originSplit }; persistSplits(next); return next })
+        drag.finalSplit = drag.originSplit
         changeCollapsed(drag.fromCollapsed)
       } else {
         const percent = Math.max(15, Math.min(85, (coordinate / length) * 100))
-        setSplitSizes(current => { const next = { ...current, [splitAxis]: percent }; persistSplits(next); return next })
+        drag.finalSplit = percent
         changeCollapsed(null)
       }
+    }
+    if (drag.moved) {
+      const next = { ...splitSizes, [drag.axis]: event.type === 'pointerup' ? drag.finalSplit : drag.originSplit }
+      if (next[drag.axis] !== splitSizes[drag.axis]) setSplitSizes(next)
+      if (event.type === 'pointerup') persistSplits(next)
+      else if (drag.fromCollapsed !== null) changeCollapsed(drag.fromCollapsed)
     }
     setDragSplit(null); setDragHint(null)
   }
@@ -1017,18 +1158,18 @@ function App() {
         <div className="term-heading"><button className="term-name" onClick={() => sendFocus(term.id)}><span className="swatch" style={{ background: term.color }} /><strong>{term.value}</strong></button>
           <button className="term-remove" title={`删除 ${term.value}`} onClick={() => { const next = termsRef.current.filter(value => value.id !== term.id); setKeywordState(next); broadcast({ ...stateRef.current, terms: next }) }}><X size={14} /></button></div>
         {[0, 1].map(slot => {
-          const result = results[slot].get(term.id), pages = [...new Set(result?.matches.map(match => match.page) ?? [])]
+          const result = results[slot].get(term.id), counts = pageCounts[slot].get(term.id)!
           const position = positions[`${slot}:${term.id}`]
           const current = position?.documentId === statsDocuments[slot]?.id && position?.mode === result?.mode && result?.matches[position.index] ? position.index : -1
           const waitingPwd = passwordPrompts[slot] !== null || (slot === 0 && detached && remoteLeft?.waitingPassword)
-          return <div className="document-result" key={slot}><div><b className={`doc-tag doc-tag-${slot}`}>{slot === 0 ? 'A' : 'B'}</b><span>{waitingPwd ? '等待密码' : !statsDocuments[slot] ? '未加载' : !statsDocuments[slot]?.ready ? `${result?.matches.length ?? 0} 处 · 索引中` : noText(slot) ? '仅查看' : result?.matches.length ? `${result.matches.length} 处` : '未命中'}</span>
+          return <div className="document-result" key={slot}><div><b className={`doc-tag doc-tag-${slot}`}>{slot === 0 ? 'A' : 'B'}</b><span>{waitingPwd ? '等待密码' : !statsDocuments[slot] ? '未加载' : !statsDocuments[slot]?.ready ? `${result?.matches.length ?? 0} 处 · 索引中` : noText(slot) ? '仅查看' : result?.matches.length ? `${result.matches.length} 处` : statsDocuments[slot]?.indexFailures ? `未命中 · ${statsDocuments[slot]!.indexFailures} 页无文字` : '未命中'}</span>
             {result?.mode === 'tolerant' && !!result.matches.length && !noText(slot) && <small>容错</small>}</div>
             {!!result?.matches.length && <div className="match-navigation">
               <button title={`${term.value} · 文档 ${slot === 0 ? 'A' : 'B'} · 上一处`} onClick={() => sendFocus(term.id, undefined, slot, -1)}><ChevronLeft size={14} /></button>
               <span data-position={`${slot}:${term.value}`}>{current < 0 ? '未定位' : `${current + 1} / ${result.matches.length}`}</span>
               <button title={`${term.value} · 文档 ${slot === 0 ? 'A' : 'B'} · 下一处`} onClick={() => sendFocus(term.id, undefined, slot, 1)}><ChevronRight size={14} /></button>
             </div>}
-            {!!pages.length && <div className="page-links">{pages.map(page => <button key={page} title={`${term.value} · 第 ${page} 页`} onClick={() => sendFocus(term.id, page, slot, 1)}>p.{page}<span>{result!.matches.filter(match => match.page === page).length}</span></button>)}</div>}
+            <PageLinks counts={counts} term={term.value} onPage={page => sendFocus(term.id, page, slot, 1)} />
           </div>
         })}
       </section>)}</div>
@@ -1050,6 +1191,7 @@ function App() {
           else if (event.key === 'Home') { event.preventDefault(); resizeSplit(15) }
           else if (event.key === 'End') { event.preventDefault(); resizeSplit(85) }
         }}><span /></div>}<PdfPane slot={slot} session={documents[slot]} error={errors[slot]} loading={loading[slot]}
+        cachePixels={windowCachePixels === null ? undefined : Math.floor(windowCachePixels / visibleSlots.length)}
         collapsed={activeCollapsed === slot} transitioning={transitioningSlot === slot}
         dimOpacity={settings.dimOpacity} autoFitOnLoad={settings.autoFitOnLoad} rotationTrigger={rotationTriggers[slot]}
         defaultReadingMode={settings.defaultReadingMode} continuousMode={settings.continuousMode} restoreView={viewsRef.current[slot]}

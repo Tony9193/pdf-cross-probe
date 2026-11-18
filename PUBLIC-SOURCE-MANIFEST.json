@@ -1,5 +1,5 @@
 {
-  "version": "1.1.4",
+  "version": "1.1.5",
   "files": [
     {
       "file": ".gitignore",
@@ -15,7 +15,7 @@
     },
     {
       "file": "README.md",
-      "sha256": "ae7e0c56059e9faf2a04f2ecb65040ed6214165e5d7f117df7dfda98263c334c"
+      "sha256": "b72f834aeeba8b27e17ecc7f7a783c98cbc935b5af2496c08671ad676fdaee5f"
     },
     {
       "file": "electron/install-update.ps1",
@@ -23,11 +23,15 @@
     },
     {
       "file": "electron/main.cjs",
-      "sha256": "2c45b3cab8e05fa868bee83023c2e7657b7dd916cfc4e6cf01ae774e71346cf4"
+      "sha256": "0beb7a9eac04359caea2574a708067507c87f1d03e9ba905e23ce14b8c4f92f5"
+    },
+    {
+      "file": "electron/memory-budget.cjs",
+      "sha256": "0a749757ce22f42ffee2c256e3b51458dae32b4f0cfa7a6175cc7cc6c725a62e"
     },
     {
       "file": "electron/preload.cjs",
-      "sha256": "171c0ea65e6d05b7f7ebc86c8866d201bc4b4632f7a3e3d0dacc58eb78e74edb"
+      "sha256": "810ce6cf3f4c79c37ae3fbaacd13fa715d673e8258c8ab891ce112d454844542"
     },
     {
       "file": "electron/update-core.cjs",
@@ -47,15 +51,15 @@
     },
     {
       "file": "package-lock.json",
-      "sha256": "a916b13bb49fe44bebdf7007ce941cae7df229a30a6cc6845032039b74c72bfd"
+      "sha256": "dad961f3b2d0be05c19553c967f99e3890f43bce555ae85581803f08f7526bcc"
     },
     {
       "file": "package.json",
-      "sha256": "b6fb3be1faf85a8d3326c94fe1b3f22a3865bba71806c4f9d6c2fee9ca96428e"
+      "sha256": "090226ec7b727d5d87742eb2b26ad56828014a993b08f419ab38ec4800480d5f"
     },
     {
       "file": "portable/README.txt",
-      "sha256": "ff6a5a9670308007af84d3cfac37236f045df73e78b345d2afd09c876d37a9f1"
+      "sha256": "b8c19d84c517be10145e8866caf925460e390127ae2aedefa7276deeb547c706"
     },
     {
       "file": "portable/Start.cmd",
@@ -74,8 +78,20 @@
       "sha256": "6b9653130a38cdb27e6f7cf392d0b4f029e314985d7a7b84be85e99a94dd062a"
     },
     {
+      "file": "scripts/benchmark-fixture.mjs",
+      "sha256": "89542d70526a7759fb4648887c70be999b84f9585bdabbd664d48d97fdaa4222"
+    },
+    {
+      "file": "scripts/benchmark-viewer.mjs",
+      "sha256": "4d1454db98a644e131a2d51f5b7e4a337baf6b5c32f1929118806c3cb81cde1b"
+    },
+    {
       "file": "scripts/build-desktop.mjs",
       "sha256": "9201ef2a16b80ded7364d03339c4996f0ed63284e7b9e57e485a35309644d5fe"
+    },
+    {
+      "file": "scripts/compare-pdf-renderers.mjs",
+      "sha256": "2f83f6c8c7e0053931625febc14d344c9efb7d03d1ca16f331f196198c4e3f1f"
     },
     {
       "file": "scripts/export-public.mjs",
@@ -91,15 +107,19 @@
     },
     {
       "file": "src/App.css",
-      "sha256": "3678ed60261aa37a919ac6f1f57aff738633c7d4cbdb35c8d0fa58fb99d4003c"
+      "sha256": "1bb7fa20eead4374fbe571a894c3f08959e101aa1cac7cdaacbdaa2f4e149870"
     },
     {
       "file": "src/App.tsx",
-      "sha256": "2a1a3115f70dea9e0b911db8650116ba034265df6d1c23d6a059ab66c7a6ec0e"
+      "sha256": "d6f9f4ca6bb0e5205eda9a08aa226a51d3b19dfa00c095940d96b4d87878cc10"
     },
     {
       "file": "src/PdfPane.tsx",
-      "sha256": "3ee5fc6d1c18098cff9a8b69d512ed191629b1151b6f651752ece37cb3b84ed1"
+      "sha256": "aa1f668903f85787a7dfa504e1599204b4dd3308de26072dc22543dfa2f43ccc"
+    },
+    {
+      "file": "src/detailRegion.ts",
+      "sha256": "89b60b9bfa732a501398e7cf828262aad903c3e6150ff14b77708e2b6126cbc5"
     },
     {
       "file": "src/index.css",
@@ -111,19 +131,27 @@
     },
     {
       "file": "src/pdf.ts",
-      "sha256": "7b900c3c2988201de5225b2a9aa786243d3aec67efb0a259e8c9ed9e6564c375"
+      "sha256": "e6900641b2e3e746b8ff51522d94b582b833d5740269dd77b4deae5e38d81b12"
     },
     {
       "file": "src/reading.ts",
-      "sha256": "bf532764d1d422f5e8f9e6721dbee3f6a747386b7980af14a567a557764a38e6"
+      "sha256": "a2ed297415db0cf8f4e927a4c678f2660459415fb746e9b8bb3b637b88ed692c"
+    },
+    {
+      "file": "src/renderQueue.ts",
+      "sha256": "d7621ea9c877d642e28965b84e880e42d5a3850c29c984c86351107ca98d888e"
     },
     {
       "file": "src/search.ts",
-      "sha256": "2c93786cc07b388a199d9cc05a148fe3a96882474b78162f32e264d5bec5e179"
+      "sha256": "eb40b47377cf977e45c628e43e2ffc27086c43eaa4fa2d30cb77f8ac0c6bedcb"
+    },
+    {
+      "file": "tests/cache-budget.test.mjs",
+      "sha256": "fb4f6ad582f28f4495e9e866a6f9d2f6f4800a03f0737747b000026577e84189"
     },
     {
       "file": "tests/electron.test.mjs",
-      "sha256": "07738499f11d894a9ac520b23b38f57ff40903194430c6366f0ebf8ac4cc4cc8"
+      "sha256": "706b777a9be83de8982d73c413bf34d2113cef0e952e69f69ab7a2fdefcc449f"
     },
     {
       "file": "tests/encrypted-fixture.mjs",
@@ -142,6 +170,10 @@
       "sha256": "2dea891406be2ef442efb475e307dfcd6c1f56486ff272f21486139326225954"
     },
     {
+      "file": "tests/render-queue.test.ts",
+      "sha256": "df2f4a47047caebaca8f6a0b3767a6b79655a368a609e3bce86bb1d7151a84f3"
+    },
+    {
       "file": "tests/search.test.ts",
       "sha256": "f848633cd4b7a4cc6d397afadefc9278265876b0938e855c2c15da58bb990d0c"
     },
@@ -151,11 +183,15 @@
     },
     {
       "file": "tests/updater.test.mjs",
-      "sha256": "149313003f33ff62d8b584005f274f98619be36a4d91f1bf970d85756b71cefe"
+      "sha256": "902215028a43006201bb08fedd96b7a7adc7aff23b38812bde6bd762dc193ad6"
     },
     {
       "file": "tests/viewer.test.mjs",
-      "sha256": "cc6c789374e27a411f25f18592d8e380a3124281bb978749bb89029d4c47470a"
+      "sha256": "deba46cc4f3100f0d1a1beb7a317713854c8365a85eb7b6fce618c03073a3e67"
+    },
+    {
+      "file": "tests/windows-update-fixture.mjs",
+      "sha256": "164782156ed2793cca8fda9bf46a63ee9a4a28569d08422495979a933cae6772"
     },
     {
       "file": "tsconfig.app.json",

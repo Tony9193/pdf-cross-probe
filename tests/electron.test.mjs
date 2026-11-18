@@ -11,6 +11,7 @@ import { _electron } from 'playwright-core'
 import { PDFDocument, StandardFonts } from 'pdf-lib'
 import { zipSync } from 'fflate'
 import { encryptedPdf } from './encrypted-fixture.mjs'
+import { removeUpdateFixture } from './windows-update-fixture.mjs'
 
 test('desktop updater processes trusted redirects and rejects untrusted or endless redirects', { timeout: 60000 }, async () => {
   const configuration = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
@@ -264,11 +265,10 @@ test('packaged desktop completes signed download and installation handoff', {
         helperPid = status.helperPid
       } catch {}
     }
-    if (launchedPid) spawnSync('taskkill.exe', ['/PID', String(launchedPid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
     if (helperPid) spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
       `$helper = Get-Process -Id ${Number(helperPid)} -ErrorAction SilentlyContinue; if ($helper) { $helper.WaitForExit(30000) | Out-Null }`],
     { stdio: 'ignore', windowsHide: true, timeout: 35000 })
-    rmSync(temporary, { recursive: true, force: true, maxRetries: 20, retryDelay: 200 })
+    await removeUpdateFixture(temporary, [target])
   }
 })
 

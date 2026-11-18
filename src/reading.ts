@@ -18,9 +18,26 @@ export function pageLayout(sizes: PageSize[], scale: number, gap = 20) {
 }
 
 export function visiblePages(layout: ReturnType<typeof pageLayout>, top: number, height: number) {
-  const visible = layout.filter(page => page.top + page.height > top && page.top < top + height)
-  if (!visible.length) return layout.length ? [Math.max(1, Math.min(layout.length, layout.findIndex(page => page.top > top) + 1 || layout.length))] : []
-  return visible.map(page => page.page)
+  let low = 0, high = layout.length
+  while (low < high) {
+    const mid = (low + high) >>> 1
+    const page = layout[mid]
+    if (page.top + page.height <= top) low = mid + 1
+    else high = mid
+  }
+  const pages = []
+  for (let i = low; i < layout.length && layout[i].top < top + height; i++) pages.push(layout[i].page)
+  return pages.length ? pages : layout.length ? [Math.min(layout.length, low + 1)] : []
+}
+
+export function flowPage(layout: ReturnType<typeof pageLayout>, y: number) {
+  let low = 0, high = layout.length
+  while (low < high) {
+    const mid = (low + high) >>> 1
+    if (layout[mid].top <= y) low = mid + 1
+    else high = mid
+  }
+  return layout[Math.max(0, low - 1)]
 }
 
 export type WheelState = { time: number; direction: number; amount: number; locked: boolean }

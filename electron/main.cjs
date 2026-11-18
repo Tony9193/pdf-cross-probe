@@ -216,8 +216,9 @@ async function queryShellIntegration() {
     return { supported: true, enabled: globalThis.__mockShellEnabled === true, executablePath: process.execPath }
   }
   try {
-    await execFileAsync('reg.exe', ['query', `HKCU\\Software\\Classes\\${progId}\\shell\\open\\command`], { windowsHide: true })
-    return { supported: true, enabled: true, executablePath: process.execPath }
+    const { stdout } = await execFileAsync('reg.exe', ['query', `HKCU\\Software\\Classes\\${progId}\\shell\\open\\command`, '/ve'], { windowsHide: true })
+    const enabled = stdout.toLowerCase().includes(launchCommandPrefix().toLowerCase())
+    return { supported: true, enabled, executablePath: process.execPath }
   } catch {
     return { supported: true, enabled: false, executablePath: process.execPath }
   }
@@ -466,6 +467,17 @@ handleViewerIPC('desktop:resolve-external-open', async (owner, event, decision) 
   return { ok: true }
 })
 handleViewerIPC('desktop:get-shell-status', () => queryShellIntegration())
+const updateMemoryBudget = require('./memory-budget.cjs').createMemoryPolicy()
+let sampledAt = -Infinity, cachePixels = null
+handleViewerIPC('desktop:cache-budget', () => {
+  if (process.platform !== 'win32') return null
+  if (performance.now() - sampledAt >= 4000) {
+    sampledAt = performance.now()
+    try { cachePixels = updateMemoryBudget(process.getSystemMemoryInfo()) }
+    catch (error) { cachePixels = null; console.warn('Cannot sample PDF cache budget:', error.message) }
+  }
+  return cachePixels === null ? null : Math.floor(cachePixels / Math.max(1, windowOwners.size))
+})
 handleViewerIPC('desktop:set-shell-integration', (_owner, _event, enabled) => updateShellIntegration(enabled === true))
 handleViewerIPC('desktop:new-window', () => { createMainWindow() })
 handleViewerIPC('desktop:update-status', () => updater.getStatus())

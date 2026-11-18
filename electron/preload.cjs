@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('pdfCrossProbeDesktop', {
   isDesktop: true,
+  getCacheBudget: () => ipcRenderer.invoke('desktop:cache-budget'),
   openNewWindow: () => ipcRenderer.invoke('desktop:new-window'),
   getUpdateStatus: () => ipcRenderer.invoke('desktop:update-status'),
   checkForUpdates: manual => ipcRenderer.invoke('desktop:update-check', manual === true),

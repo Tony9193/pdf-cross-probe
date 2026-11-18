@@ -2,13 +2,14 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { createHash, generateKeyPairSync, randomUUID, sign } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { spawn, spawnSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { createRequire } from 'node:module'
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { zipSync } from 'fflate'
+import { removeUpdateFixture } from './windows-update-fixture.mjs'
 
 const require = createRequire(import.meta.url)
 const { compareVersions, safeEntry, verifyManifest, inspectArchive } = require('../electron/update-core.cjs')
@@ -236,12 +237,13 @@ test('Windows installer starts the real new viewer and rolls back a broken execu
   const newSource = path.resolve(pkg.build.directories.output, 'win-unpacked')
   assert.ok(existsSync(path.join(newSource, 'PDF Cross Probe.exe')), `Package version ${pkg.version} before running installer tests`)
   const directory = await mkdtemp(path.join(tmpdir(), 'PDF 更新 安装测试 '))
-  const launched = []
+  const targets = []
   try {
     for (const scenario of ['success', 'broken', 'interrupted']) {
       const broken = scenario === 'broken'
       const root = path.join(directory, scenario)
       const target = path.join(root, 'viewer'), stage = path.join(root, '.pdf-update-test')
+      targets.push(target)
       const profile = path.join(root, 'profile'), work = path.join(profile, 'updates', 'job-test')
       const token = randomUUID(), oldFolder = scenario === 'interrupted' ? `${target}.backup-${token}` : target
       await mkdir(work, { recursive: true })
@@ -269,19 +271,17 @@ test('Windows installer starts the real new viewer and rolls back a broken execu
       }
       const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
         path.resolve('electron/install-update.ps1'), '-TransactionFile', journal], {
-        stdio: 'ignore', windowsHide: true, env: { ...process.env, PDF_CROSS_PROBE_MOCK_REGISTRY: '1' },
+        stdio: ['ignore', 'ignore', 'inherit'], windowsHide: true, env: { ...process.env, PDF_CROSS_PROBE_MOCK_REGISTRY: '1' },
       })
       const [code] = await once(child, 'exit')
       assert.equal(code, 0)
       const result = JSON.parse(await readFile(status, 'utf8'))
-      if (result.pid) launched.push(result.pid)
-      assert.equal(result.phase, scenario === 'success' ? 'installed' : 'rolled-back')
+      assert.equal(result.phase, scenario === 'success' ? 'installed' : 'rolled-back', `${scenario}: ${result.phase}: ${result.message}`)
       assert.equal((await readFile(path.join(target, 'local-note.txt'))).toString(), 'user file remains local')
       if (scenario !== 'success') assert.equal(hash(await readFile(path.join(target, 'PDF Cross Probe.exe'))), oldHash)
       else assert.equal(JSON.parse(await readFile(health, 'utf8')).version, pkg.version)
     }
   } finally {
-    for (const pid of launched) spawnSync('taskkill.exe', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
-    await rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 200 })
+    await removeUpdateFixture(directory, targets)
   }
 })

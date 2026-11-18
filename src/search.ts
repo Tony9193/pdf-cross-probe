@@ -1,7 +1,7 @@
 export type Match = { page: number; start: number; length: number }
 export type SearchResult = { mode: 'exact' | 'tolerant'; matches: Match[] }
 
-const identifierCharacter = /[A-Z0-9_+./#~\[\]-]/i
+const identifierCharacter = /[A-Z0-9_+./#~[\]-]/i
 
 function normalize(text: string) {
   let value = ''
@@ -18,7 +18,7 @@ function normalize(text: string) {
     value += normalized
     offset += character.length
   }
-  return { value, starts, ends }
+  return { value, starts: Uint32Array.from(starts), ends: Uint32Array.from(ends) }
 }
 
 type PreparedSearchPage = ReturnType<typeof normalize> & { boundaries: Set<number> }

@@ -1,12 +1,13 @@
 import { GlobalWorkerOptions, OPS, getDocument } from 'pdfjs-dist'
-import type { PDFDocumentProxy } from 'pdfjs-dist'
+import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist'
 import workerUrl from 'pdfjs-dist/build/pdf.worker.mjs?url'
 import { angleDistance, DocumentSearchIndex } from './search'
 
 GlobalWorkerOptions.workerSrc = workerUrl
+type TextContent = Awaited<ReturnType<PDFPageProxy['getTextContent']>>
 
 export type Segment = { start: number; text: string; padReferenceOffset?: number }
-export type PageIndex = { text: string; segments: Segment[]; padReferenceBoundaries?: number[] }
+export type PageIndex = { text: string; segments: Segment[]; padReferenceBoundaries?: number[]; error?: string }
 export type DocumentSession = {
   id: string
   name: string
@@ -15,8 +16,10 @@ export type DocumentSession = {
   pdf: PDFDocumentProxy
   pages: PageIndex[]
   indexed: number
+  indexFailures: number
   ready: boolean
   search: DocumentSearchIndex
+  markInitialRaster: () => void
 }
 
 export function createPdfTask(bytes: Uint8Array, password?: string) {
@@ -35,10 +38,28 @@ export async function openPdf(bytes: Uint8Array, password?: string) {
   return createPdfTask(bytes, password).promise
 }
 
-export async function indexPage(pdf: PDFDocumentProxy, pageNumber: number): Promise<PageIndex> {
+function sharePending<K extends object, Args extends unknown[], V>(load: (key: K, ...args: Args) => Promise<V>) {
+  const pending = new WeakMap<K, Promise<V>>()
+  return (key: K, ...args: Args) => {
+    const existing = pending.get(key)
+    if (existing) return existing
+    const request = load(key, ...args).finally(() => pending.delete(key))
+    pending.set(key, request)
+    return request
+  }
+}
+
+export const getPageText = sharePending((page: PDFPageProxy) => page.getTextContent({ disableNormalization: true }))
+const buildPendingIndex = sharePending(async (page: PDFPageProxy, content?: TextContent) =>
+  buildPageIndex(page, content ?? await getPageText(page)))
+
+export async function indexPage(pdf: PDFDocumentProxy, pageNumber: number, content?: TextContent): Promise<PageIndex> {
   const page = await pdf.getPage(pageNumber)
+  return buildPendingIndex(page, content)
+}
+
+async function buildPageIndex(page: PDFPageProxy, content: TextContent): Promise<PageIndex> {
   // 保留 PDF 原始文本，让搜索索引自行归一化并映射回文本位置。
-  const content = await page.getTextContent({ disableNormalization: true })
   const padTagPattern = /^PAU(?:FB|TP|R|C|U|L|Q|D|J|F)[0-9]+$/i
   const candidates = new Set(content.items.flatMap(item =>
     'str' in item && padTagPattern.test(item.str.trim()) ? [item.str.trim().toUpperCase()] : []))

@@ -117,8 +117,8 @@ input[type=checkbox] { accent-color: var(--accent); }
 .sample-bar select { border: 0; background: transparent; width: 100%; font-size: 11px; color: var(--muted); height: 20px; }
 .pdf-scroll { flex: 1; min-height: 0; overflow: auto; padding: 24px; background-color: var(--canvas-bg); background-image: linear-gradient(var(--grid-line) 1px, transparent 1px), linear-gradient(90deg, var(--grid-line) 1px, transparent 1px); background-size: 20px 20px; position: relative; touch-action: pan-x pan-y; }
 .paper { position: relative; background: #fff; box-shadow: var(--shadow-md); border-radius: 2px; margin: 0; --min-font-size: 1; }
-.page-flow { min-width: 100%; }
-.page-slot { position: relative; overflow: hidden; background: #fff; contain: layout paint; }
+.page-flow { position: relative; min-width: 100%; overflow-anchor: none; }
+.page-slot { position: absolute; overflow: hidden; background: #fff; contain: layout paint; }
 .pdf-scroll { overscroll-behavior: contain; }
 .paper canvas { display: block; }
 .page-content { position: absolute; top: 0; left: 0; z-index: 0; transform-origin: 0 0; }

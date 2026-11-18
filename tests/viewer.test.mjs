@@ -126,6 +126,108 @@ afterEach(async () => {
 
 after(async () => { await browser?.close(); await server?.close() })
 
+test('slow and failed page text do not block crisp graphics or shift search page numbers', { timeout: 60000 }, async () => {
+  await page.evaluate(async bytes => {
+    const dependency = performance.getEntriesByType('resource').find(entry => new URL(entry.name).pathname.endsWith('/pdfjs-dist.js'))
+    const { getDocument } = await import(dependency.name)
+    const task = getDocument({ data: new Uint8Array(bytes) })
+    const probe = await task.promise
+    const prototype = Object.getPrototypeOf(probe)
+    await task.destroy()
+    const original = prototype.getPage, patched = new WeakSet()
+    const gate = new Promise(resolve => { window.releasePageText = resolve })
+    const lateGate = new Promise(resolve => { window.releaseLatePage = resolve })
+    prototype.getPage = async function (number) {
+      const pdfPage = await original.call(this, number)
+      if (!patched.has(pdfPage)) {
+        patched.add(pdfPage)
+        const getText = pdfPage.getTextContent.bind(pdfPage)
+        pdfPage.getTextContent = async options => {
+          if (number === 1) await gate
+          if (number === 2) throw new Error('test: this page cannot extract text')
+          if (number === 4) await lateGate
+          return getText(options)
+        }
+      }
+      return pdfPage
+    }
+  }, [...fixture])
+  const document = await PDFDocument.create()
+  const font = await document.embedFont(StandardFonts.Helvetica)
+  for (const [index, label] of ['GND', 'BADPAGE', 'TAILMATCH', 'LATEMATCH'].entries()) {
+    document.addPage([640, 800]).drawText(label, { x: 80, y: 680, size: 20 + index, font })
+  }
+  const pane = page.locator('[data-slot="0"]')
+  await pane.locator('input[type=file]').setInputFiles({ name: 'isolated-page.pdf', mimeType: 'application/pdf', buffer: Buffer.from(await document.save()) })
+  await pane.locator('.paper[data-render-phase="preview"]').waitFor()
+  const zoomInput = pane.locator('.zoom-value')
+  await zoomInput.click()
+  await page.keyboard.press('Control+A')
+  await page.keyboard.type('400')
+  await pane.locator('.paper[data-render-phase="preview"] .detail-canvas[data-scale="4"]').waitFor()
+  await pane.locator('.paper').evaluate(element => {
+    window.canvasCopies = 0
+    window.copyObserver = new MutationObserver(records => { window.canvasCopies += records.length })
+    for (const canvas of element.querySelectorAll('canvas')) {
+      window.copyObserver.observe(canvas, { attributes: true, attributeFilter: ['width', 'height'] })
+    }
+  })
+  await page.evaluate(() => window.releasePageText())
+  await pane.locator('.paper[data-render-phase="ready"] .textLayer span', { hasText: 'GND' }).waitFor()
+  assert.equal(await page.evaluate(() => { window.copyObserver.disconnect(); return window.canvasCopies }), 0)
+  await pane.locator('.pane-status', { hasText: '索引中 3/4' }).waitFor()
+  await addTerm(page, 'GND')
+  await page.waitForFunction(() => document.querySelector('[data-position="0:GND"]')?.textContent === '1 / 1')
+  await addTerm(page, 'LATEMATCH')
+  assert.equal(await page.locator('[data-position="0:LATEMATCH"]').count(), 0)
+  await page.evaluate(() => window.releaseLatePage())
+  await pane.locator('.pane-status', { hasText: '1 页无法提取文字' }).waitFor()
+  await page.waitForFunction(() => document.querySelector('[data-position="0:LATEMATCH"]')?.textContent === '1 / 1')
+  await pane.locator('.paper[data-rendered-page="4"]').waitFor()
+  await addTerm(page, 'TAILMATCH')
+  await termResult(page, 'TAILMATCH').getByRole('button', { name: /p\.3/ }).waitFor()
+  await addTerm(page, 'MISSING_REF')
+  await termResult(page, 'MISSING_REF').getByText('未命中 · 1 页无文字', { exact: true }).waitFor()
+  await pane.getByRole('spinbutton', { name: '文档 A 页码', exact: true }).fill('2')
+  await pane.locator('.paper[data-rendered-page="2"][data-render-phase="ready"]').waitFor()
+  await pane.getByRole('alert').filter({ hasText: '第 2 页无法提取文字' }).waitFor()
+  assert.equal(await pane.locator('.paper .base-canvas').evaluate(canvas => canvas.getContext('2d').getImageData(80, 110, 180, 15).data.some(value => value < 32)), true)
+})
+
+test('linked search sends page deltas and resynchronizes after a dropped batch', { timeout: 60000 }, async () => {
+  const popup = page.waitForEvent('popup')
+  await page.getByRole('button', { name: '双屏窗口', exact: true }).click()
+  const secondary = await popup
+  await secondary.locator('[data-slot="1"] .pane-status', { hasText: '文字索引完成' }).waitFor()
+  await page.evaluate(() => {
+    const post = BroadcastChannel.prototype.postMessage
+    window.indexMessages = []
+    let dropped = false
+    BroadcastChannel.prototype.postMessage = function (message) {
+      if (message.type === 'left-delta') {
+        window.indexMessages.push({ type: message.type, from: message.delta.from, count: message.delta.pages.length })
+        if (!dropped) { dropped = true; return }
+      } else if (message.type === 'left-index') {
+        window.indexMessages.push({ type: message.type, count: message.left?.texts.length })
+      }
+      return post.call(this, message)
+    }
+  })
+  const document = await PDFDocument.create()
+  const font = await document.embedFont(StandardFonts.Helvetica)
+  for (let n = 0; n < 7; n++) document.addPage().drawText('DELTA42', { x: 90, y: 680, font, size: 20 })
+  await upload(page, 0, Buffer.from(await document.save()), 'index-delta.pdf')
+  await addTerm(secondary, 'DELTA42')
+  const match = termResult(secondary, 'DELTA42').locator('.document-result').first()
+  await match.getByText('7 处', { exact: true }).waitFor()
+  await match.getByRole('button', { name: /p\.7/ }).click()
+  await page.waitForFunction(() => document.querySelector('[data-slot="0"] .paper')?.dataset.renderedPage === '7')
+  const messages = await page.evaluate(() => window.indexMessages)
+  assert.deepEqual(messages.filter(message => message.type === 'left-delta').map(({ from, count }) => [from, count]), [[0, 3], [3, 3], [6, 1]])
+  assert.ok(messages.filter(message => message.type === 'left-index' && message.count > 0).length >= 1)
+  await secondary.close()
+})
+
 test('subpixel rotated CAD text stays aligned at high zoom', { timeout: 60000 }, async () => {
   const pdf = await PDFDocument.create()
   const font = await pdf.embedFont(StandardFonts.Courier)
@@ -273,14 +375,19 @@ test('initial popup positions and cleared navigation agree in both windows', { t
 })
 
 test('text-layer mismatch still commits the new page and damaged files reset busy state', { timeout: 60000 }, async () => {
-  await page.route('**/src/PdfPane.tsx', async route => {
-    const response = await route.fetch()
-    const source = await response.text()
-    assert.ok(source.includes('const aligned = '))
-    await route.fulfill({ response, body: source.replace('const aligned = ', 'const aligned = pageNumber !== 2 && ') })
+  await page.evaluate(async () => {
+    const dependency = performance.getEntriesByType('resource').find(entry => new URL(entry.name).pathname.endsWith('/pdfjs-dist.js'))
+    const { TextLayer } = await import(dependency.name)
+    const original = Object.getOwnPropertyDescriptor(TextLayer.prototype, 'textContentItemsStr')
+    Object.defineProperty(TextLayer.prototype, 'textContentItemsStr', {
+      ...original,
+      get() {
+        const items = original.get.call(this)
+        return items.join('').trim() === 'GND' ? ['misaligned'] : items
+      },
+    })
   })
-  await page.reload()
-  await upload(page, 0)
+  await upload(page, 0, fixture, 'text-mismatch.pdf')
   const checksum = () => page.locator('[data-slot="0"] .base-canvas').evaluate(canvas => {
     const data = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data
     return data.reduce((sum, value) => sum + value, 0)
@@ -340,6 +447,8 @@ test('drag selects diagram text and copies it without triggering linked search',
 
 test('divider resizes both layouts without losing documents, highlights or dual-window state', { timeout: 60000 }, async () => {
   await addTerm(page, 'R3501')
+  await addTerm(page, 'Ｒ３５０１')
+  assert.equal(await page.locator('.term-result').count(), 1)
   const divider = page.getByRole('separator', { name: '调整文档面板大小' })
   await page.waitForFunction(() => document.querySelectorAll('.current-hit').length === 2)
   const initial = await page.locator('[data-slot="0"]').boundingBox()
@@ -349,6 +458,7 @@ test('divider resizes both layouts without losing documents, highlights or dual-
   const resized = await page.locator('[data-slot="0"]').boundingBox()
   assert.ok(resized.width > initial.width + 100)
   assert.ok(Number(await divider.getAttribute('aria-valuenow')) > 50)
+  assert.ok(await page.evaluate(() => JSON.parse(localStorage.getItem('pdf-cross-probe:settings:v1') ?? '{}')?.savedSplits?.horizontal > 50))
   assert.equal(await page.locator('.current-hit').count(), 2)
   await divider.dblclick()
   assert.equal(await divider.getAttribute('aria-valuenow'), '50')
@@ -580,13 +690,46 @@ test('page previews prefetch neighbors, reuse text layers and evict old pages', 
   console.log(JSON.stringify({ cachedPageNavigationMs: timings, reusedTextLayer: true, maxCachedPages: 3 }))
 })
 
-test('new-page graphics appear before a delayed text layer without stale highlights', { timeout: 60000 }, async () => {
-  await page.route('**/src/PdfPane.tsx', async route => {
-    const response = await route.fetch(), source = await response.text()
-    assert.ok(source.includes('textLayer = new TextLayer'))
-    await route.fulfill({ response, body: source.replace('textLayer = new TextLayer', 'await new Promise(resolve => setTimeout(resolve, 400)); textLayer = new TextLayer') })
+test('memory pressure drops optional caches without replacing current text or clearing detail', { timeout: 60000 }, async () => {
+  await page.addInitScript(() => {
+    window.__budget = 64_000_000
+    window.pdfCrossProbeDesktop = {
+      getCacheBudget: async () => window.__budget,
+      getShellStatus: async () => null, consumeLaunchQueue: async () => [], getExternalOpenRequest: async () => null,
+      getUpdateStatus: async () => ({ phase: 'idle' }), checkForUpdates: async () => ({ phase: 'idle' }),
+      reportWorkspaceState: async () => {}, onUpdateStatus: () => () => {},
+      onLaunchFiles: () => () => {}, onExternalOpenRequest: () => () => {},
+    }
   })
   await page.reload()
+  await upload(page, 0)
+  const paper = page.locator('[data-slot="0"] .paper')
+  await page.waitForFunction(() => Number(document.querySelector('[data-slot="0"] .paper')?.dataset.cachedPages) > 1)
+  await paper.evaluate(el => {
+    window.__originalText = el.querySelector('.textLayer span')
+    window.__budget = 0
+  })
+  await page.waitForFunction(() => {
+    const el = document.querySelector('[data-slot="0"] .paper')
+    return el.dataset.cachedPages === '1' && el.dataset.cachedPrecisionPixels === '0'
+  })
+  assert.ok(await paper.evaluate(el => el.querySelector('.textLayer span') === window.__originalText &&
+    el.querySelector('.detail-canvas').width > 0 && el.querySelector('.detail-canvas').style.display === 'block'))
+  await page.evaluate(() => { window.__budget = 64_000_000 })
+  await page.waitForFunction(() => Number(document.querySelector('[data-slot="0"] .paper')?.dataset.cachedPages) > 1)
+})
+
+test('new-page graphics appear before a delayed text layer without stale highlights', { timeout: 60000 }, async () => {
+  await page.evaluate(async () => {
+    const dependency = performance.getEntriesByType('resource').find(entry => new URL(entry.name).pathname.endsWith('/pdfjs-dist.js'))
+    const { TextLayer } = await import(dependency.name)
+    const original = TextLayer.prototype.render
+    const gate = new Promise(resolve => { window.releaseTextLayerRender = resolve })
+    TextLayer.prototype.render = async function () {
+      await gate
+      return original.call(this)
+    }
+  })
   await page.locator('[data-slot="0"] input[type=file]').setInputFiles({ name: 'preview first.pdf', mimeType: 'application/pdf', buffer: fixture })
   await page.waitForFunction(() => document.querySelector('[data-slot="0"] .paper')?.dataset.renderPhase === 'preview')
   assert.equal(await page.locator('[data-slot="0"] .textLayer span').count(), 0)
@@ -595,6 +738,7 @@ test('new-page graphics appear before a delayed text layer without stale highlig
     const data = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data
     return data.some((value, index) => index % 4 !== 3 && value < 200)
   }), true)
+  await page.evaluate(() => window.releaseTextLayerRender())
   await page.waitForFunction(() => document.querySelector('[data-slot="0"] .paper')?.dataset.renderPhase === 'ready')
   assert.ok(await page.locator('[data-slot="0"] .textLayer span').count() > 0)
 })
@@ -662,8 +806,14 @@ test('precision coverage retains sharp content during moderate pans before redra
       const pane = document.querySelector('[data-slot="0"]'), tile = pane.querySelector('.paper[data-page="1"] .detail-canvas')
       if (!tile) return false
       const scroll = pane.querySelector('.pdf-scroll'), viewport = scroll.getBoundingClientRect(), box = tile.getBoundingClientRect()
-      return tile.dataset.scale === '10' && box.left <= viewport.left && box.top <= viewport.top &&
-        box.right >= viewport.left + scroll.clientWidth && box.bottom >= viewport.top + scroll.clientHeight
+      const target = tile.closest('.paper').querySelector('.current-hit')?.getBoundingClientRect()
+      return tile.dataset.scale === '10' && target &&
+        Math.abs(target.left + target.width / 2 - viewport.left - scroll.clientWidth / 2) <= 2 &&
+        Math.abs(target.top + target.height / 2 - viewport.top - scroll.clientHeight / 2) <= 2 &&
+        box.left <= viewport.left - scroll.clientWidth * 0.25 + 1 &&
+        box.top <= viewport.top - scroll.clientHeight * 0.25 + 1 &&
+        box.right >= viewport.left + scroll.clientWidth * 1.25 - 1 &&
+        box.bottom >= viewport.top + scroll.clientHeight * 1.25 - 1
     })
     const coverage = await page.locator('[data-slot="0"]').evaluate(pane => {
       const scroll = pane.querySelector('.pdf-scroll'), paper = pane.querySelector('.paper[data-page="1"]'), tile = paper.querySelector('.detail-canvas')
@@ -885,14 +1035,16 @@ test('continuous flow virtualizes mixed pages while retaining a cross-page selec
   })
   assert.ok(selected.includes('PAGE1') && selected.includes('PAGE2'))
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
-  await pane.locator('.pdf-scroll').evaluate(element => { element.scrollTop = element.querySelector('[data-flow-page="20"]').offsetTop })
+  await pane.locator('.pdf-scroll').evaluate(element => { element.scrollTop = element.scrollHeight })
   await page.waitForFunction(() => document.querySelector('[data-slot="0"] .paper[data-page="20"]')?.dataset.renderPhase === 'ready')
   assert.equal(await pane.locator('.paper[data-page="1"]').count(), 1)
   assert.equal(await page.evaluate(() => getSelection().toString()), selected)
   await page.evaluate(() => getSelection().removeAllRanges())
   await page.waitForFunction(() => !document.querySelector('[data-slot="0"] .paper[data-page="1"]'))
   assert.ok(await pane.locator('.page-flow .paper').count() <= 5)
+  assert.ok(await pane.locator('.page-slot').count() <= 5)
   await pane.getByRole('spinbutton', { name: '文档 A 缩放百分比', exact: true }).fill('10')
+  await pane.getByRole('spinbutton', { name: '文档 A 页码', exact: true }).fill('1')
   await page.waitForFunction(() => document.querySelectorAll('[data-slot="0"] .page-flow .paper').length > 3)
   assert.deepEqual(await pane.locator('.page-slot').evaluateAll(elements => elements.slice(0, 2).map(element => element.getBoundingClientRect().height)), [80, 50])
   await page.screenshot({ path: 'artifacts/viewer-continuous-desktop.png' })
@@ -915,13 +1067,17 @@ test('continuous wheel zoom keeps cursor PDF anchor across frames, rotations, mi
 
   async function assertAnchoredBurst({ pageNum, baseSize, rotation, steps, inGap = false, startScale = 150, offsetX = 135, offsetY = 165 }) {
     await pane.getByRole('spinbutton', { name: '文档 A 缩放百分比', exact: true }).fill(String(startScale))
-    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+    if (!await pane.locator(`[data-flow-page="${pageNum}"]`).count()) {
+      await pane.getByRole('spinbutton', { name: '文档 A 页码', exact: true }).fill(String(pageNum))
+    }
+    await pane.locator(`[data-flow-page="${pageNum}"]`).waitFor()
     await scroll.evaluate((element, { pageNum, inGap, offsetY }) => {
       const slot = element.querySelector(`[data-flow-page="${pageNum}"]`)
+      const top = element.scrollTop + slot.getBoundingClientRect().top - element.getBoundingClientRect().top
       element.scrollLeft = 180
       element.scrollTop = inGap
-        ? slot.offsetTop + slot.offsetHeight + 8 - offsetY
-        : slot.offsetTop + Math.min(220, slot.offsetHeight * 0.45) - offsetY + 60
+        ? top + slot.offsetHeight + 8 - offsetY
+        : top + Math.min(220, slot.offsetHeight * 0.45) - offsetY + 60
     }, { pageNum, inGap, offsetY })
     await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 160)))
     const bounds = await scroll.boundingBox()
@@ -973,6 +1129,7 @@ test('continuous wheel zoom keeps cursor PDF anchor across frames, rotations, mi
       requestAnimationFrame(tick)
       return { pdfX, pdfY, gapY }
     }, { pageNum, baseSize, rotation, clientX, clientY, inGap })
+    if (inGap) assert.ok(anchor.gapY > 0 && anchor.gapY < 20, `Expected cursor in the inter-page gap, got ${anchor.gapY}`)
 
     for (const batch of steps) {
       if (Array.isArray(batch)) {
