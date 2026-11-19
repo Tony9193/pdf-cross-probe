@@ -34,9 +34,28 @@ $encoding = New-Object Text.UTF8Encoding($false)
 $child = $null
 $healthy = $false
 
-function Write-State([string]$phase, [string]$message = '') {
+$newFiles = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+$newDirs = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+foreach ($entry in $transaction.files) {
+  [void]$newFiles.Add([string]$entry)
+  $parts = ([string]$entry).Split('/')
+  $prefix = ''
+  for ($i = 0; $i -lt ($parts.Length - 1); $i++) {
+    $prefix = if ($prefix) { "$prefix/$($parts[$i])" } else { $parts[$i] }
+    [void]$newDirs.Add($prefix)
+  }
+}
+$previousFiles = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+if ($transaction.PSObject.Properties['previousFiles'] -and $transaction.previousFiles) {
+  foreach ($entry in $transaction.previousFiles) {
+    [void]$previousFiles.Add([string]$entry)
+  }
+}
+
+function Write-State([string]$phase, [string]$message = '', $cleanupComplete = $null) {
   $result = @{ phase = $phase; token = $transaction.token; version = $transaction.version; message = $message; helperPid = $PID }
   if ($child) { $result.pid = $child.Id }
+  if ($null -ne $cleanupComplete) { $result.cleanupComplete = [bool]$cleanupComplete }
   [IO.File]::WriteAllText($transaction.status, ($result | ConvertTo-Json -Compress), $encoding)
 }
 
@@ -63,13 +82,25 @@ function Preserve-LocalFiles([string]$directory, [string]$relative = '') {
   foreach ($item in Get-ChildItem -LiteralPath $directory -Force) {
     if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Portable directory contains a link' }
     $name = if ($relative) { "$relative/$($item.Name)" } else { $item.Name }
-    if ($item.PSIsContainer) { Preserve-LocalFiles $item.FullName $name }
-    elseif ($transaction.files -notcontains $name) {
+    if ($item.PSIsContainer) {
+      if ($newFiles.Contains($name)) { throw "Local directory conflicts with update file: $name" }
+      Preserve-LocalFiles $item.FullName $name
+    }
+    elseif (-not $newFiles.Contains($name) -and -not $previousFiles.Contains($name)) {
+      if ($newDirs.Contains($name)) { throw "Local file conflicts with update directory: $name" }
       $destination = [IO.Path]::Combine($stage, $name.Replace('/', [IO.Path]::DirectorySeparatorChar))
+      if (Test-Path -LiteralPath $destination) { throw "Local file conflicts with update path: $name" }
       [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($destination)) | Out-Null
       [IO.File]::Copy($item.FullName, $destination, $false)
     }
   }
+}
+
+function Clean-TempDirectories {
+  $ok = $true
+  try { if (Test-Path -LiteralPath $transaction.failed) { Remove-Item -LiteralPath $transaction.failed -Recurse -Force -ErrorAction Stop } } catch { $ok = $false }
+  try { if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction Stop } } catch { $ok = $false }
+  return $ok
 }
 
 try {
@@ -79,8 +110,11 @@ try {
     if ($prior.phase -eq 'installed') { exit 0 }
     if (Test-Path -LiteralPath $target) { Move-Directory $target $transaction.failed }
     Move-Directory $transaction.backup $target
+    if (-not (Test-Path -LiteralPath ([IO.Path]::Combine($target, 'PDF Cross Probe.exe')))) { throw 'Restored backup is missing application executable' }
     $child = Start-Viewer $false
-    Write-State 'rolled-back' 'Interrupted update restored from transaction backup'
+    $cleanupOk = Clean-TempDirectories
+    $note = if ($cleanupOk) { 'Interrupted update restored from transaction backup' } else { 'Interrupted update restored from transaction backup (temporary files remain)' }
+    Write-State 'rolled-back' $note $cleanupOk
     exit 0
   }
   Write-State 'waiting'
@@ -114,14 +148,22 @@ try {
   if ($child -and -not $child.HasExited) {
     try { $child.Kill(); $child.WaitForExit(10000) | Out-Null } catch {}
   }
+  $restored = $false
   try {
     if (Test-Path -LiteralPath $transaction.backup) {
       if (Test-Path -LiteralPath $target) { Move-Directory $target $transaction.failed }
       Move-Directory $transaction.backup $target
     }
-    if (Test-Path -LiteralPath ([IO.Path]::Combine($target, 'PDF Cross Probe.exe'))) { $child = Start-Viewer $false }
-    Write-State 'rolled-back' 'Update failed; old application restored'
-    if (Test-Path -LiteralPath $transaction.failed) { Remove-Item -LiteralPath $transaction.failed -Recurse -Force }
-    if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
-  } catch { Write-State 'recovery-needed' 'Restore the preserved backup directory before retrying' }
+    if (Test-Path -LiteralPath ([IO.Path]::Combine($target, 'PDF Cross Probe.exe'))) {
+      $child = Start-Viewer $false
+      $restored = $true
+    }
+  } catch {}
+  if (-not $restored) {
+    Write-State 'recovery-needed' 'Restore the preserved backup directory before retrying'
+    exit 0
+  }
+  $cleanupOk = Clean-TempDirectories
+  $note = if ($cleanupOk) { 'Update failed; old application restored' } else { 'Update failed; old application restored (temporary files remain)' }
+  Write-State 'rolled-back' $note $cleanupOk
 }

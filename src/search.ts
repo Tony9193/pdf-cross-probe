@@ -27,58 +27,102 @@ function prepareSearchPage(text: string, boundaries: readonly number[] = []): Pr
   return { ...normalize(text), boundaries: new Set(boundaries) }
 }
 
-function searchPreparedPages(pages: PreparedSearchPage[], keyword: string, forceTolerant = false): SearchResult {
-  const query = normalize(keyword.trim()).value
-  if (!query) return { mode: forceTolerant ? 'tolerant' : 'exact', matches: [] }
-  const exact: Match[] = []
-  const contained: Match[] = []
-  pages.forEach((normalized, pageIndex) => {
-    let cursor = 0
-    while (cursor <= normalized.value.length - query.length) {
-      const found = normalized.value.indexOf(query, cursor)
-      if (found < 0) break
-      const match = {
-        page: pageIndex + 1,
-        start: normalized.starts[found],
-        length: normalized.ends[found + query.length - 1] - normalized.starts[found],
-      }
-      contained.push(match)
-      const before = normalized.value[found - 1] ?? ''
-      const after = normalized.value[found + query.length] ?? ''
-      if ((!identifierCharacter.test(before) || normalized.boundaries.has(match.start)) && !identifierCharacter.test(after)) exact.push(match)
-      cursor = found + query.length
+function scanPage(normalized: PreparedSearchPage, pageIndex: number, query: string, exact: Match[], contained: Match[]) {
+  let cursor = 0
+  while (cursor <= normalized.value.length - query.length) {
+    const found = normalized.value.indexOf(query, cursor)
+    if (found < 0) break
+    const match = {
+      page: pageIndex + 1,
+      start: normalized.starts[found],
+      length: normalized.ends[found + query.length - 1] - normalized.starts[found],
     }
-  })
-  // 未强制宽松搜索时，全文有完整标识符匹配就优先返回它们；否则回退到包含匹配。
-  if (!forceTolerant && exact.length) return { mode: 'exact', matches: exact }
-  return { mode: 'tolerant', matches: contained }
+    contained.push(match)
+    const before = normalized.value[found - 1] ?? ''
+    const after = normalized.value[found + query.length] ?? ''
+    if ((!identifierCharacter.test(before) || normalized.boundaries.has(match.start)) && !identifierCharacter.test(after)) exact.push(match)
+    cursor = found + query.length
+  }
 }
+
+type IncrementalEntry = {
+  scanned: number
+  exact: Match[]
+  contained: Match[]
+  exactSnapshot: SearchResult | null
+  tolerantSnapshot: SearchResult | null
+  autoSnapshot: SearchResult | null
+}
+
+const maxCachedQueries = 64
 
 export class DocumentSearchIndex {
   private pages: PreparedSearchPage[] = []
-  private results = new Map<string, SearchResult>()
+  private anyText = false
+  private cache = new Map<string, IncrementalEntry>()
 
   constructor(pages: string[] = []) {
-    this.pages = pages.map(text => prepareSearchPage(text))
+    this.pages = pages.map(text => {
+      const prepared = prepareSearchPage(text)
+      if (prepared.value.trim().length > 0) this.anyText = true
+      return prepared
+    })
   }
 
   append(text: string, boundaries: readonly number[] = []) {
-    this.pages.push(prepareSearchPage(text, boundaries))
-    this.results.clear()
+    const prepared = prepareSearchPage(text, boundaries)
+    if (prepared.value.trim().length > 0) this.anyText = true
+    this.pages.push(prepared)
   }
 
   get hasText() {
-    return this.pages.some(page => page.value.trim().length > 0)
+    return this.anyText
   }
 
   search(keyword: string, forceTolerant = false): SearchResult {
-    const key = JSON.stringify([keyword.trim(), forceTolerant])
-    let result = this.results.get(key)
-    if (!result) {
-      result = searchPreparedPages(this.pages, keyword, forceTolerant)
-      this.results.set(key, result)
+    const query = normalize(keyword.trim()).value
+    if (!query) return { mode: forceTolerant ? 'tolerant' : 'exact', matches: [] }
+    let entry = this.cache.get(query)
+    if (entry) {
+      // Refresh LRU order so deleted keywords are evicted under churn.
+      this.cache.delete(query)
+      this.cache.set(query, entry)
+    } else {
+      if (this.cache.size >= maxCachedQueries) {
+        const oldest = this.cache.keys().next().value
+        if (oldest !== undefined) this.cache.delete(oldest)
+      }
+      entry = { scanned: 0, exact: [], contained: [], exactSnapshot: null, tolerantSnapshot: null, autoSnapshot: null }
+      this.cache.set(query, entry)
     }
-    return result
+    if (entry.scanned < this.pages.length) {
+      const prevExact = entry.exact.length
+      const prevContained = entry.contained.length
+      for (let pageIndex = entry.scanned; pageIndex < this.pages.length; pageIndex++) {
+        scanPage(this.pages[pageIndex], pageIndex, query, entry.exact, entry.contained)
+      }
+      entry.scanned = this.pages.length
+      if (entry.exact.length !== prevExact) {
+        entry.exactSnapshot = null
+        entry.autoSnapshot = null
+      }
+      if (entry.contained.length !== prevContained) {
+        entry.tolerantSnapshot = null
+        if (!entry.exact.length) entry.autoSnapshot = null
+      }
+    }
+    if (forceTolerant) {
+      entry.tolerantSnapshot ??= { mode: 'tolerant', matches: [...entry.contained] }
+      return entry.tolerantSnapshot
+    }
+    // 未强制宽松搜索时，全文有完整标识符匹配就优先返回它们；否则回退到包含匹配。
+    if (entry.exact.length) {
+      entry.exactSnapshot ??= { mode: 'exact', matches: [...entry.exact] }
+      entry.autoSnapshot = entry.exactSnapshot
+      return entry.exactSnapshot
+    }
+    entry.autoSnapshot ??= { mode: 'tolerant', matches: [...entry.contained] }
+    return entry.autoSnapshot
   }
 }
 

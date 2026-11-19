@@ -9,13 +9,14 @@ contextBridge.exposeInMainWorld('pdfCrossProbeDesktop', {
   downloadUpdate: () => ipcRenderer.invoke('desktop:update-download'),
   cancelUpdate: () => ipcRenderer.invoke('desktop:update-cancel'),
   installUpdate: () => ipcRenderer.invoke('desktop:update-install'),
-  openUpdatePage: () => ipcRenderer.invoke('desktop:update-page'),
+  openUpdatePage: target => target === undefined ? ipcRenderer.invoke('desktop:update-page') : ipcRenderer.invoke('desktop:update-page', target),
   onUpdateStatus: callback => {
     const listener = (_event, value) => callback(value)
     ipcRenderer.on('desktop:update-state', listener)
     return () => ipcRenderer.removeListener('desktop:update-state', listener)
   },
   consumeLaunchQueue: () => ipcRenderer.invoke('desktop:consume-launch-queue'),
+  ackLaunchDelivery: (deliveryId, outcome) => ipcRenderer.invoke('desktop:ack-launch-delivery', deliveryId, outcome),
   onLaunchFiles: callback => {
     const listener = (_event, payload) => callback(payload)
     ipcRenderer.on('desktop:launch-files', listener)

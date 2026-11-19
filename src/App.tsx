@@ -1,8 +1,12 @@
 import { Fragment, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
 import { PasswordResponses } from 'pdfjs-dist'
 import type { PDFDocumentLoadingTask } from 'pdfjs-dist'
-import { ArrowLeftRight, ArrowUpCircle, Check, ChevronLeft, ChevronRight, Columns2, Download, ExternalLink, Moon, Monitor, MonitorUp, PanelLeftClose, PanelLeftOpen, PanelsTopLeft, Plus, RefreshCw, Rows2, Search, Settings, Spotlight, Square, Sun, Trash2, X } from 'lucide-react'
+import { ArrowLeftRight, ArrowUpCircle, Check, ChevronLeft, ChevronRight, Columns2, Download, Eraser, ExternalLink, Moon, Monitor, MonitorUp, PanelLeftClose, PanelLeftOpen, PanelsTopLeft, Pencil, Plus, RefreshCw, Rows2, Search, Settings, Spotlight, Square, Sun, Trash2, Undo2, X } from 'lucide-react'
 import PdfPane from './PdfPane'
+import ReleaseNotes from './ReleaseNotes'
+import type { ReleasePageTarget } from './releaseNotesParser'
+import { editInk, emptyInk } from './ink'
+import type { InkAction, InkState, InkTool } from './ink'
 import type { ColoredMatch, Navigation, PasswordPrompt, TextSelection } from './PdfPane'
 import { createPdfTask, indexPage } from './pdf'
 import type { DocumentSession, PageIndex } from './pdf'
@@ -66,7 +70,14 @@ function loadSettings(): AppSettings {
   } catch { return defaultSettings }
 }
 
-type LaunchPayload = { targetSlot: number | null; files: { id?: string; name: string; bytes: Uint8Array }[]; error?: string }
+type LaunchDeliveryOutcome = 'accepted' | 'cancelled' | 'slot-changed'
+type LaunchPayload = {
+  targetSlot: number | null
+  files: { id?: string; name: string; bytes: Uint8Array }[]
+  error?: string
+  deliveryId?: string
+  expectedSlotIds?: string[]
+}
 type WorkspaceSlotSummary = { status: 'empty' | 'loading' | 'password' | 'ready'; id: string; name: string }
 type WorkspaceSummary = {
   sessionId: string
@@ -112,9 +123,10 @@ type DesktopBridge = {
   downloadUpdate: () => Promise<UpdateStatus>
   cancelUpdate: () => Promise<UpdateStatus>
   installUpdate: () => Promise<UpdateStatus>
-  openUpdatePage: () => Promise<void>
+  openUpdatePage: (target?: ReleasePageTarget) => Promise<void>
   onUpdateStatus: (callback: (value: UpdateStatus) => void) => () => void
   consumeLaunchQueue: () => Promise<LaunchPayload[]>
+  ackLaunchDelivery?: (deliveryId: string, outcome: LaunchDeliveryOutcome) => Promise<void>
   onLaunchFiles: (callback: (payload: LaunchPayload) => void) => () => void
   reportWorkspaceState: (slots: WorkspaceSlotSummary[]) => Promise<void>
   getExternalOpenRequest: () => Promise<ExternalOpenRequest | null>
@@ -180,6 +192,7 @@ function App() {
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus>({ phase: 'idle', currentVersion: packageInfo.version })
   const [shellStatus, setShellStatus] = useState<{ supported: boolean; enabled: boolean; executablePath: string } | null>(null)
   const [shellBusy, setShellBusy] = useState(false)
+  const [shellError, setShellError] = useState('')
   const [externalRequest, setExternalRequest] = useState<ExternalOpenRequest | null>(null)
   const [externalConfirm, setExternalConfirm] = useState<ExternalReplaceConfirm | null>(null)
   const [externalNotice, setExternalNotice] = useState('')
@@ -197,6 +210,26 @@ function App() {
   const searchInputRef = useRef<HTMLTextAreaElement>(null)
   const activeTermIdRef = useRef<string | null>(null)
   const [documents, setDocuments] = useState<(DocumentSession | null)[]>([null, null])
+  const [ink, setInk] = useState(() => [emptyInk(''), emptyInk('')])
+  const inkRef = useRef(ink)
+  const [inkTool, setInkTool] = useState<InkTool>({ mode: 'read', color: '#e33c41', width: 2 })
+  const inkToolRef = useRef(inkTool)
+  inkToolRef.current = inkTool
+  const exitInk = () => setInkTool(t => t.mode === 'read' ? t : { ...t, mode: 'read' })
+  function setSlotInk(slot: number, next: InkState) {
+    inkRef.current = inkRef.current.map((s, i) => i === slot ? next : s)
+    setInk(inkRef.current)
+  }
+  function applyInk(slot: number, id: string, action: InkAction, notify: boolean) {
+    const state = inkRef.current[slot]
+    if (!id || state.id !== id) return
+    setSlotInk(slot, editInk(state, action))
+    if (notify && slot === 1) channel.current?.postMessage({ type: 'ink', id, action })
+  }
+  function confirmDiscard(slots: number[]) {
+    const names = slots.filter(s => inkRef.current[s].strokes.length).map(s => s === 0 ? 'A' : 'B')
+    return !names.length || window.confirm(`文档 ${names.join('、')} 的临时笔迹不会保存。丢弃笔迹并继续？`)
+  }
   const [remoteLeft, setRemoteLeft] = useState<RemoteDocument | null>(null)
   const remoteLeftRef = useRef(remoteLeft)
   const tasksRef = useRef<(PDFDocumentLoadingTask | null)[]>([null, null])
@@ -210,6 +243,8 @@ function App() {
   const pendingSourceRef = useRef<{ documentId: string; slot: number; termId: string; selection: TextSelection } | null>(null)
   const viewsRef = useRef<(ViewSnapshot | null)[]>([null, null])
   const [errors, setErrors] = useState(['', '']), [loading, setLoading] = useState([false, false])
+  const loadingRef = useRef(loading)
+  loadingRef.current = loading
   const [passwordPrompts, setPasswordPrompts] = useState<(PasswordPrompt | null)[]>([null, null])
   const passwordPromptsRef = useRef(passwordPrompts)
   passwordPromptsRef.current = passwordPrompts
@@ -471,6 +506,7 @@ function App() {
   async function loadDocument(slot: number, name: string, bytes: Uint8Array, id: string = crypto.randomUUID(), initialPassword?: string) {
     if (detached && slot === 0) return
     // 异步加载或索引完成时用版本号排除已被新文件或取消操作替代的任务。
+    if (inkRef.current[slot].id !== id) setSlotInk(slot, emptyInk(id))
     const revision = ++revisions.current[slot]
     readRequests.current[slot] = id
     const previous = tasksRef.current[slot]
@@ -478,7 +514,8 @@ function App() {
     passwordCallbacks.current[slot] = null
     passwordsRef.current[slot] = initialPassword
     queuedPasswords.current[slot] = []
-    pendingFilesRef.current[slot] = { id, name, bytes, password: initialPassword }
+    const keepBytes = slot === 1 && !detached
+    pendingFilesRef.current[slot] = { id, name, bytes: keepBytes ? bytes : new Uint8Array(0), password: initialPassword }
     setPasswordPrompts(value => value.map((item, index) => index === slot ? null : item))
     let task: PDFDocumentLoadingTask | null = null
     documentsRef.current = documentsRef.current.map((item, index) => index === slot ? null : item)
@@ -492,7 +529,7 @@ function App() {
       await previous?.destroy()
       if (revisions.current[slot] !== revision) return
       if (!name.toLowerCase().endsWith('.pdf')) throw new Error('仅支持 PDF 文件')
-      task = createPdfTask(bytes, initialPassword)
+      task = createPdfTask(bytes, initialPassword, keepBytes)
       tasksRef.current[slot] = task
       passwordAttempts.current[slot] = 0
       task.onPassword = (updatePassword: (password: string | Error) => void, reason: number) => {
@@ -507,7 +544,7 @@ function App() {
         passwordCallbacks.current[slot] = updatePassword
         passwordsRef.current[slot] = undefined
         if (pendingFilesRef.current[slot]?.id === id) {
-          pendingFilesRef.current[slot] = { id, name, bytes }
+          pendingFilesRef.current[slot] = { id, name, bytes: keepBytes ? bytes : new Uint8Array(0) }
         }
         const incorrect = reason === PasswordResponses.INCORRECT_PASSWORD
         setLoading(value => value.map((item, index) => index === slot ? false : item))
@@ -523,7 +560,7 @@ function App() {
       if (slot === 0) publishLeft({ id, name, indexed: 0, ready: false, waitingPassword: false })
       let markInitialRaster: () => void = () => {}
       const initialRaster = new Promise<void>(resolve => { markInitialRaster = resolve })
-      const retainedBytes = slot === 1 && !detached ? bytes : new Uint8Array(0)
+      const retainedBytes = keepBytes ? bytes : new Uint8Array(0)
       const session: DocumentSession = { id, name, bytes: retainedBytes, password: passwordsRef.current[slot], pdf, pages: [], indexed: 0, indexFailures: 0, ready: false,
         search: new DocumentSearchIndex(), markInitialRaster }
       setDocuments(value => value.map((item, index) => index === slot ? session : item))
@@ -611,6 +648,8 @@ function App() {
   }
 
   function closeDocument(slot: number, notify = true) {
+    if (notify && !confirmDiscard([slot])) return
+    setSlotInk(slot, emptyInk(''))
     const id = documentsRef.current[slot]?.id ?? readRequests.current[slot]
     cancelPassword(slot, false)
     documentsRef.current = documentsRef.current.map((value, index) => index === slot ? null : value)
@@ -634,9 +673,8 @@ function App() {
 
   async function loadBytesToSlot(slot: 0 | 1, name: string, bytes: Uint8Array, id: string = crypto.randomUUID()) {
     readRequests.current[slot] = id
-    const copy = new Uint8Array(bytes)
-    if (slot === 1) channel.current?.postMessage({ type: 'file', file: { id, name, bytes: copy } })
-    await loadDocument(slot, name, copy, id)
+    if (slot === 1) channel.current?.postMessage({ type: 'file', file: { id, name, bytes } })
+    await loadDocument(slot, name, bytes, id)
   }
 
   function applyExternalOpenRequest(next: ExternalOpenRequest | null) {
@@ -748,10 +786,45 @@ function App() {
     return slot.name
   }
 
+  function currentWorkspaceSlots(): WorkspaceSlotSummary[] {
+    return ([0, 1] as const).map(slot => {
+      const doc = documentsRef.current[slot]
+      if (doc) return { status: 'ready', id: doc.id, name: doc.name }
+      const prompt = passwordPromptsRef.current[slot]
+      if (prompt) return { status: 'password', id: prompt.id, name: prompt.name }
+      if (loadingRef.current[slot] && pendingFilesRef.current[slot]) {
+        return { status: 'loading', id: pendingFilesRef.current[slot]!.id, name: pendingFilesRef.current[slot]!.name }
+      }
+      return { status: 'empty', id: '', name: '' }
+    })
+  }
+
   const handleLaunchPayload = useEffectEvent((payload: LaunchPayload) => {
-    if (payload.error) { setConnectionError(payload.error); return }
-    if (detached || !payload?.files?.length) return
+    const desktop = window.pdfCrossProbeDesktop
+    const ack = (outcome: LaunchDeliveryOutcome) => {
+      if (payload.deliveryId) void desktop?.ackLaunchDelivery?.(payload.deliveryId, outcome).catch(() => {})
+    }
+    if (payload.error) { setConnectionError(payload.error); ack('cancelled'); return }
+    if (detached || !payload?.files?.length) { ack('cancelled'); return }
+    const affectedSlots = payload.targetSlot === 0 || payload.targetSlot === 1
+      ? [payload.targetSlot]
+      : payload.files.length >= 2 ? [0, 1] : [0]
+    if (payload.expectedSlotIds) {
+      const liveSlots = currentWorkspaceSlots()
+      const mismatch = affectedSlots.some(index => (liveSlots[index].status === 'empty' ? '' : liveSlots[index].id) !== String(payload.expectedSlotIds?.[index] ?? ''))
+      if (mismatch) {
+        void desktop?.reportWorkspaceState(liveSlots).catch(() => {})
+        ack('slot-changed')
+        return
+      }
+    }
+    if (!confirmDiscard(affectedSlots)) {
+      void desktop?.reportWorkspaceState(currentWorkspaceSlots()).catch(() => {})
+      ack('cancelled')
+      return
+    }
     setConnectionError('')
+    ack('accepted')
     if (payload.targetSlot === 0 || payload.targetSlot === 1) {
       const target = payload.targetSlot
       if (collapsedPane === target) changeCollapsed(null)
@@ -773,6 +846,7 @@ function App() {
     try {
       const bytes = new Uint8Array(await file.arrayBuffer())
       if (readRequests.current[slot] !== id) return
+      if (!confirmDiscard([slot])) { readRequests.current[slot] = documentsRef.current[slot]?.id ?? id; return }
       if (slot === 1) channel.current?.postMessage({ type: 'file', file: { id, name: file.name, bytes } })
       await loadDocument(slot, file.name, bytes, id)
     } catch (error) {
@@ -788,6 +862,7 @@ function App() {
       if (!response.ok) throw new Error('样本读取失败')
       const bytes = new Uint8Array(await response.arrayBuffer())
       if (readRequests.current[slot] !== id) return
+      if (!confirmDiscard([slot])) { readRequests.current[slot] = documentsRef.current[slot]?.id ?? id; return }
       if (slot === 1) channel.current?.postMessage({ type: 'file', file: { id, name, bytes } })
       await loadDocument(slot, name, bytes, id)
     } catch (error) {
@@ -808,7 +883,7 @@ function App() {
         setSeparated(true)
         const right = documentsRef.current[1]
         const rightFile: DocumentInfo | null = right ? { id: right.id, name: right.name, bytes: right.bytes, password: right.password } : pendingFilesRef.current[1]
-        communication.postMessage({ type: 'state', state: { ...stateRef.current, settings: settingsRef.current }, left: leftSnapshot(), right: rightFile, rightView: viewsRef.current[1], targets: snapshotFocus() })
+        communication.postMessage({ type: 'state', state: { ...stateRef.current, settings: settingsRef.current }, left: leftSnapshot(), right: rightFile, rightInk: inkRef.current[1], rightView: viewsRef.current[1], targets: snapshotFocus() })
       } else if (message.type === 'state') {
         const state = message.state as SharedState
         setKeywordState(state.terms); stateRef.current = state
@@ -818,6 +893,7 @@ function App() {
         setDim(state.dim); setTolerant(state.tolerant)
         if ('left' in message) receiveLeft(message.left)
         if (message.rightView) viewsRef.current[1] = message.rightView
+        if (message.right && message.rightInk?.id === message.right.id) setSlotInk(1, message.rightInk)
         if (message.right) void loadDocument(1, message.right.name, new Uint8Array(message.right.bytes), message.right.id, message.right.password)
         if (message.targets) applyFocus(message.targets)
         else if (message.focus) locate(message.focus)
@@ -827,11 +903,12 @@ function App() {
       else if (message.type === 'password' && readRequests.current[1] === message.id) submitPassword(1, message.password, false)
       else if (message.type === 'cancel-file' && readRequests.current[1] === message.id) cancelPassword(1, false)
       else if (message.type === 'close-file' && (documentsRef.current[1]?.id ?? readRequests.current[1]) === message.id) closeDocument(1, false)
+      else if (message.type === 'ink') applyInk(1, message.id, message.action, false)
       else if (message.type === 'left-index') receiveLeft(message.left)
       else if (message.type === 'left-delta') receiveLeftDelta(message.delta)
       else if (message.type === 'left-resync' && !detached && indexReceiver.current) communication.postMessage({ type: 'left-index', left: leftSnapshot() })
       else if (message.type === 'view') viewsRef.current[message.slot] = message.view
-      else if (message.type === 'closed' && !detached) { indexReceiver.current = false; setSeparated(false) }
+      else if (message.type === 'closed' && !detached) { indexReceiver.current = false; childWindow.current = null; setSeparated(false) }
       else if (message.type === 'restore' && detached) window.close()
       else if (message.type === 'focus') {
         if (message.targets) applyFocus(message.targets)
@@ -904,6 +981,7 @@ function App() {
         if (settingsOpen) { event.preventDefault(); setSettingsOpen(false); return }
         if (externalConfirmRef.current) { event.preventDefault(); setExternalConfirm(null); return }
         if (externalRequestRef.current) { event.preventDefault(); void cancelExternalOpen(); return }
+        if (inkToolRef.current.mode !== 'read') { event.preventDefault(); setInkTool(t => ({ ...t, mode: 'read' })); return }
       }
       if (event.key === 'F3' && termsRef.current.length > 0) {
         event.preventDefault()
@@ -968,20 +1046,30 @@ function App() {
   useEffect(() => {
     if (detached || !separated) return
     const timer = window.setInterval(() => {
-      if (childWindow.current?.closed) { indexReceiver.current = false; setSeparated(false) }
+      if (childWindow.current?.closed) { indexReceiver.current = false; childWindow.current = null; setSeparated(false) }
     }, 500)
     return () => clearInterval(timer)
   }, [detached, separated])
   function separate() {
     setCollapsedPane(null); setDragSplit(null); setDragHint(null)
+    if (childWindow.current && !childWindow.current.closed) {
+      childWindow.current.focus()
+      setConnectionError('')
+      return
+    }
     const url = new URL(location.href); url.searchParams.set('panel', 'right')
-    childWindow.current = window.open(url.href, '_blank')
-    setConnectionError(childWindow.current ? '' : '新窗口未打开，请允许弹出窗口后重试')
+    const opened = window.open(url.href, '_blank')
+    if (opened) {
+      childWindow.current = opened
+      setConnectionError('')
+    } else {
+      setConnectionError('新窗口未打开，请允许弹出窗口后重试')
+    }
   }
   function restore() {
     setCollapsedPane(null); setDragSplit(null); setDragHint(null)
     indexReceiver.current = false
-    channel.current?.postMessage({ type: 'restore' }); childWindow.current?.close(); setSeparated(false)
+    channel.current?.postMessage({ type: 'restore' }); childWindow.current?.close(); childWindow.current = null; setSeparated(false)
   }
   const visibleSlots = detached ? [1] : separated ? [0] : swapped ? [1, 0] : [0, 1]
   const firstSlot = visibleSlots[0] as 0 | 1
@@ -1109,14 +1197,33 @@ function App() {
     const desktop = window.pdfCrossProbeDesktop
     if (!desktop || shellBusy) return
     setShellBusy(true)
+    setShellError('')
     try {
       const updated = await desktop.setShellIntegration(nextEnabled)
       setShellStatus(updated)
-    } catch { /* ignore */ } finally {
+    } catch (error) {
+      setShellError(error instanceof Error && error.message ? `无法更新系统右键关联：${error.message}` : '无法更新系统右键关联，可能受系统策略限制')
+    } finally {
       setShellBusy(false)
     }
   }
   const noText = (slot: number) => statsDocuments[slot]?.ready && !statsDocuments[slot]?.search.hasText
+  const interactiveSlots = visibleSlots.filter(s => activeCollapsed !== s)
+  const hasVisibleDocument = interactiveSlots.some(s => documents[s] !== null)
+  let undoSlot: number | null = null
+  let undoSeq = -1
+  for (const s of interactiveSlots) {
+    const lastSeq = ink[s].history.at(-1)?.seq
+    if (lastSeq !== undefined && (lastSeq > undoSeq || (lastSeq === undoSeq && s === activeSlot))) {
+      undoSeq = lastSeq
+      undoSlot = s
+    }
+  }
+  useEffect(() => {
+    if (!hasVisibleDocument && inkToolRef.current.mode !== 'read') {
+      setInkTool(t => ({ ...t, mode: 'read' }))
+    }
+  }, [hasVisibleDocument])
 
   return <main className="app-shell">
     <header className="app-header">
@@ -1128,6 +1235,26 @@ function App() {
         <div><h1>PDF 联动查看器</h1><span>Cross Probe · v{packageInfo.version}</span></div>
       </div>
       <div className="header-actions">
+        {inkTool.mode === 'read' ? (
+          <button className="command icon-command" title="临时画笔" aria-label="临时画笔" aria-pressed={false} disabled={!hasVisibleDocument}
+            onClick={() => setInkTool(t => ({ ...t, mode: 'draw' }))}><Pencil size={16} /><span>画笔</span></button>
+        ) : (
+          <div className="ink-toolbar" role="toolbar" aria-label="临时画笔工具">
+            <button className="ink-button" title="自由画笔" aria-label="临时画笔" aria-pressed={inkTool.mode === 'draw'}
+              onClick={() => setInkTool(t => ({ ...t, mode: t.mode === 'draw' ? 'read' : 'draw' }))}><Pencil size={15} /><span>画笔</span></button>
+            <input className="ink-color" aria-label="画笔颜色" title="画笔颜色" type="color" value={inkTool.color}
+              onChange={e => setInkTool(t => ({ ...t, mode: 'draw', color: e.target.value }))} />
+            <select className="ink-width" aria-label="画笔粗细" title="画笔粗细" value={inkTool.width}
+              onChange={e => setInkTool(t => ({ ...t, mode: 'draw', width: Number(e.target.value) }))}>
+              <option value="1">细</option><option value="2">中</option><option value="4">粗</option>
+            </select>
+            <button className="ink-button" title="擦除笔迹（点击或拖动）" aria-pressed={inkTool.mode === 'erase'}
+              onClick={() => setInkTool(t => ({ ...t, mode: t.mode === 'erase' ? 'draw' : 'erase' }))}><Eraser size={15} /><span>橡皮</span></button>
+            <button className="ink-button" title="撤销笔迹" aria-label="撤销笔迹" disabled={undoSlot === null}
+              onClick={() => { if (undoSlot !== null) applyInk(undoSlot, documents[undoSlot]?.id ?? '', 'undo', true) }}><Undo2 size={15} /><span>撤销</span></button>
+            <button className="ink-button ink-exit" title="退出画笔 (Esc)" aria-label="退出画笔" onClick={exitInk}><X size={15} /></button>
+          </div>
+        )}
         <button className="command icon-command" title="新建窗口" aria-label="新建窗口" onClick={openNewWindow}><Plus size={16} /><span>新建窗口</span></button>
         {!detached && !separated && <button className="command icon-command" title="互换 A/B 面板位置" aria-pressed={swapped} onClick={() => setSwapped(value => !value)}><ArrowLeftRight size={16} /><span>互换 A/B</span></button>}
         {!detached && !separated && !narrow && <div className="segmented"><button title="左右分屏" aria-pressed={!vertical} onClick={() => { changeCollapsed(null); setVertical(false); persistSplits(splitSizes, false) }}><Columns2 size={17} /></button><button title="上下分屏" aria-pressed={vertical} onClick={() => { changeCollapsed(null); setVertical(true); persistSplits(splitSizes, true) }}><Rows2 size={17} /></button></div>}
@@ -1191,6 +1318,7 @@ function App() {
           else if (event.key === 'Home') { event.preventDefault(); resizeSplit(15) }
           else if (event.key === 'End') { event.preventDefault(); resizeSplit(85) }
         }}><span /></div>}<PdfPane slot={slot} session={documents[slot]} error={errors[slot]} loading={loading[slot]}
+         ink={ink[slot]} inkTool={inkTool} onInk={action => applyInk(slot, documents[slot]?.id ?? '', action, true)} onExitInk={exitInk}
         cachePixels={windowCachePixels === null ? undefined : Math.floor(windowCachePixels / visibleSlots.length)}
         collapsed={activeCollapsed === slot} transitioning={transitioningSlot === slot}
         dimOpacity={settings.dimOpacity} autoFitOnLoad={settings.autoFitOnLoad} rotationTrigger={rotationTriggers[slot]}
@@ -1309,6 +1437,7 @@ function App() {
                   {shellStatus.enabled ? '取消右键与关联' : '注册右键与打开方式'}
                 </button>
               </div>
+              {shellError && <div role="alert" className="error">{shellError}</div>}
             </div>}
           </section>
           <section className="setting-section shortcut-section">
@@ -1338,7 +1467,8 @@ function App() {
         <div className="modal-body">
           <p>当前版本 v{updateStatus.currentVersion}{updateStatus.version && updateStatus.version !== updateStatus.currentVersion ? ` · 新版本 v${updateStatus.version}` : ''}</p>
           {updateStatus.phase === 'checking' && <p role="status">正在检查更新</p>}
-          {updateStatus.notes && <pre className="update-notes">{updateStatus.notes}</pre>}
+          {updateStatus.notes && <ReleaseNotes notes={updateStatus.notes}
+            onOpenRelease={window.pdfCrossProbeDesktop ? target => void window.pdfCrossProbeDesktop?.openUpdatePage(target) : undefined} />}
           {updateStatus.message && <p role="status">{updateStatus.message}</p>}
           {['downloading', 'verifying'].includes(updateStatus.phase) && <><progress aria-label="更新下载进度" value={updateStatus.progress ?? 0} max={100} />
             <span>{updateStatus.phase === 'verifying' ? '正在校验签名和文件' : `${updateStatus.progress ?? 0}%`}</span>

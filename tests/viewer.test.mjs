@@ -1181,6 +1181,151 @@ test('continuous wheel zoom keeps cursor PDF anchor across frames, rotations, mi
   assert.ok(Number.isFinite(clamped.left) && Number.isFinite(clamped.top) && clamped.left >= 0 && clamped.top >= 0)
 })
 
+test('temporary ink follows PDF coordinates, detaches with B and never repaints the PDF when drawing', { timeout: 60000 }, async () => {
+  const header = page.locator('.app-header')
+  const pane = page.locator('[data-slot="1"]')
+  assert.equal(await pane.locator('.pane-toolbar').getByRole('button', { name: '临时画笔' }).count(), 0)
+  await header.getByRole('button', { name: '临时画笔', exact: true }).click()
+  await header.getByLabel('画笔粗细').selectOption('1')
+  const layer = pane.locator('.ink-layer')
+  await layer.waitFor()
+  const paper = pane.locator('.paper').first()
+  await pane.locator('.detail-canvas').first().waitFor({ state: 'visible' })
+  await page.evaluate(async bytes => {
+    const dependency = performance.getEntriesByType('resource').find(entry => new URL(entry.name).pathname.endsWith('/pdfjs-dist.js'))
+    const { getDocument } = await import(dependency.name)
+    const task = getDocument({ data: new Uint8Array(bytes) })
+    const proto = Object.getPrototypeOf(await (await task.promise).getPage(1))
+    await task.destroy()
+    const original = proto.render
+    window.inkRenders = 0
+    proto.render = function (...args) { window.inkRenders++; return original.apply(this, args) }
+  }, [...fixture])
+  const p = await layer.boundingBox()
+  const x = p.x + 45, y = p.y + 55
+  await page.mouse.move(x, y); await page.mouse.down()
+  await page.mouse.move(x + 40, y + 10, { steps: 8 }); await page.mouse.up()
+  const stroke = pane.locator('path[data-stroke]')
+  await stroke.waitFor()
+  const d = await stroke.getAttribute('d')
+  assert.equal(await page.evaluate(() => window.inkRenders), 0)
+  assert.equal(await stroke.getAttribute('stroke-width'), '1')
+  const start = await stroke.evaluate(el => { const { x, y } = el.getPointAtLength(0).matrixTransform(el.getScreenCTM()); return { x, y } })
+  assert.ok(Math.hypot(start.x - x, start.y - y) < 1)
+  await header.getByText('橡皮', { exact: true }).click()
+  // Click 6px away from the thin 1pt stroke to verify generous eraser hit radius
+  await page.mouse.click(start.x, start.y + 6)
+  await stroke.waitFor({ state: 'detached' })
+  await header.getByRole('button', { name: '撤销笔迹', exact: true }).click()
+  await stroke.waitFor()
+  // Swipe across the middle of the stroke to verify drag-to-erase
+  await page.mouse.move(x + 20, y - 15); await page.mouse.down()
+  await page.mouse.move(x + 20, y + 25, { steps: 6 }); await page.mouse.up()
+  await stroke.waitFor({ state: 'detached' })
+  await header.getByRole('button', { name: '撤销笔迹', exact: true }).click()
+  await page.keyboard.press('Escape')
+  assert.equal(await stroke.getAttribute('d'), d)
+  assert.equal(await layer.evaluate(el => getComputedStyle(el).pointerEvents), 'none')
+  page.once('dialog', dialog => dialog.dismiss())
+  await pane.getByRole('button', { name: '关闭文档 B' }).click()
+  assert.equal(await stroke.getAttribute('d'), d)
+  const before = await stroke.evaluate(el => el.getScreenCTM().a)
+  await pane.getByTitle('顺时针旋转 90°').click()
+  await page.waitForFunction(a => {
+    const m = document.querySelector('[data-slot="1"] path[data-stroke]')?.getScreenCTM()
+    return m && Math.abs(m.a) < 0.001 && Math.abs(m.b - a) < 0.01
+  }, before)
+  await pane.getByTitle('下一页').click()
+  await stroke.waitFor({ state: 'detached' })
+  await pane.getByTitle('上一页').click()
+  await stroke.waitFor()
+  const popup = page.waitForEvent('popup')
+  await page.getByRole('button', { name: '双屏窗口', exact: true }).click()
+  const secondary = await popup
+  const b = secondary.locator('[data-slot="1"]')
+  const secondaryHeader = secondary.locator('.app-header')
+  assert.equal(await b.locator('path[data-stroke]').getAttribute('d'), d)
+  await secondaryHeader.getByRole('button', { name: '临时画笔', exact: true }).click()
+  await secondaryHeader.getByRole('button', { name: '撤销笔迹', exact: true }).click()
+  await b.locator('path[data-stroke]').waitFor({ state: 'detached' })
+  await secondary.close()
+  await paper.waitFor()
+  assert.equal(await stroke.count(), 0)
+})
+
+test('update modal renders formatted markdown notes with safe links and double-click detach opens one window', { timeout: 60000 }, async () => {
+  const sampleNotes = [
+    '## 更新内容（v1.1.6）',
+    '',
+    '- **临时讲解画笔**：支持选色、粗细、橡皮与撤销。',
+    '- **外部打开可靠性**：修复并发替换与取消回执。',
+    '- **增量搜索与内存优化**：大文件加载更省内存。',
+    '',
+    '## 下载与升级说明',
+    '',
+    '- **v1.1.3 及以上用户可在线升级**。',
+    '- **v1.1.2 及更早版本请手动下载**：解压 `PDF-Cross-Probe-1.1.6-win-x64.zip` 后运行 `PDF Cross Probe.exe`。',
+    '- 查看 [v1.1.6](https://github.com/Tony9193/pdf-cross-probe/releases/tag/v1.1.6) 或 [最新版](https://github.com/Tony9193/pdf-cross-probe/releases/latest)，外链 [忽略](https://example.com)，图片 ![x](https://example.com/a.png)。',
+  ].join('\n')
+  const testPage = await context.newPage()
+  await testPage.addInitScript(notes => {
+    window.__openedTargets = []
+    window.pdfCrossProbeDesktop = {
+      isDesktop: true,
+      openNewWindow: async () => {},
+      getUpdateStatus: async () => ({ phase: 'available', currentVersion: '1.1.5', version: '1.1.6', notes }),
+      checkForUpdates: async () => ({ phase: 'available', currentVersion: '1.1.5', version: '1.1.6', notes }),
+      downloadUpdate: async () => ({ phase: 'available', currentVersion: '1.1.5', version: '1.1.6', notes }),
+      cancelUpdate: async () => ({ phase: 'available', currentVersion: '1.1.5', version: '1.1.6', notes }),
+      installUpdate: async () => ({ phase: 'available', currentVersion: '1.1.5', version: '1.1.6', notes }),
+      openUpdatePage: async target => { window.__openedTargets.push(target ?? 'default') },
+      onUpdateStatus: () => () => {},
+      consumeLaunchQueue: async () => [],
+      onLaunchFiles: () => () => {},
+      reportWorkspaceState: async () => {},
+      getExternalOpenRequest: async () => null,
+      resolveExternalOpen: async () => ({ ok: true }),
+      onExternalOpenRequest: () => () => {},
+      getShellStatus: async () => ({ supported: true, enabled: false, executablePath: 'test.exe' }),
+      setShellIntegration: async () => { throw new Error('policy blocked') },
+    }
+  }, sampleNotes)
+  await testPage.goto(url)
+  await testPage.getByRole('button', { name: '偏好设置', exact: true }).click()
+  await testPage.getByRole('button', { name: '注册右键与打开方式' }).click()
+  await testPage.getByRole('alert').filter({ hasText: '无法更新系统右键关联' }).waitFor()
+  await testPage.getByRole('button', { name: '检查更新', exact: true }).click()
+  const updateModal = testPage.getByRole('dialog', { name: '软件更新' })
+  await updateModal.waitFor()
+  const notesBox = updateModal.locator('.update-notes')
+  assert.equal(await notesBox.locator('h3').count(), 2)
+  assert.equal(await notesBox.locator('ul').count(), 2)
+  assert.ok(await notesBox.locator('strong').count() >= 5)
+  assert.ok(await notesBox.locator('code').filter({ hasText: 'PDF-Cross-Probe-1.1.6-win-x64.zip' }).count() >= 1)
+  assert.equal(await notesBox.locator('img').count(), 0)
+  const text = await notesBox.textContent()
+  assert.ok(!text.includes('## '))
+  assert.ok(!text.includes('**'))
+  assert.equal(await notesBox.getByRole('button', { name: '忽略' }).count(), 0)
+  await notesBox.getByRole('button', { name: 'v1.1.6', exact: true }).click()
+  await notesBox.getByRole('button', { name: '最新版', exact: true }).click()
+  await updateModal.getByRole('button', { name: 'GitHub 手动下载' }).click()
+  assert.deepEqual(await testPage.evaluate(() => window.__openedTargets), ['1.1.6', 'latest', 'default'])
+  await testPage.close()
+
+  // Rapid double-click on 双屏窗口 opens only one popup without false popup-blocked errors.
+  const popups = []
+  page.on('popup', win => popups.push(win))
+  const detachBtn = page.getByRole('button', { name: '双屏窗口', exact: true })
+  await detachBtn.dblclick()
+  await page.waitForFunction(() => document.querySelector('button')?.textContent !== null && document.body.textContent.includes('恢复双栏'))
+  assert.equal(popups.length, 1)
+  assert.equal(await page.locator('.error').count(), 0)
+  await page.getByRole('button', { name: '恢复双栏', exact: true }).click()
+  await page.waitForFunction(() => document.body.textContent.includes('双屏窗口'))
+  await popups[0].waitForEvent('close').catch(() => {})
+})
+
 test('detaching B preserves its page, zoom and reading position', { timeout: 60000 }, async () => {
   const pane = page.locator('[data-slot="1"]')
   await pane.getByRole('spinbutton', { name: '文档 B 页码', exact: true }).fill('2')

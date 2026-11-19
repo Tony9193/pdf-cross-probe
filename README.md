@@ -2,9 +2,11 @@
 
 A local PDF.js viewer for linked schematic and reference-designator searches. PDFs are read locally, never uploaded, and never modified.
 
+**画笔** in the top header bar enables temporary freehand ink on either drawing. Choose a color and width; use **橡皮** (click or drag across strokes) to remove a whole stroke, or **撤销** to undo. Esc returns to reading without hiding ink. Marks follow the page through zoom, rotation and the detached B window. They are not saved or exported. The update dialog formats release notes headings, lists, bold text, inline code, and clickable GitHub release links for this repository without rendering HTML or remote images.
+
 ## Run
 
-For Windows users, extract `release/1.1.5/PDF-Cross-Probe-1.1.5-win-x64.zip`, or copy the complete `release/1.1.5/win-unpacked` directory. Double-click `PDF Cross Probe.exe` or `Start.cmd`. The EXE needs its companion files; do not copy it alone. Python, Node.js, WebView2, a local server and an internet connection are not required for viewing. This build has no Windows code-signing certificate and may require approval under Windows or company security policy; do not disable security software. Chinese usage instructions are included in `README.txt`. Versioned output keeps an already-running older release untouched.
+For Windows users, extract `release/1.1.6/PDF-Cross-Probe-1.1.6-win-x64.zip`, or copy the complete `release/1.1.6/win-unpacked` directory. Double-click `PDF Cross Probe.exe` or `Start.cmd`. The EXE needs its companion files; do not copy it alone. Python, Node.js, WebView2, a local server and an internet connection are not required for viewing. This build has no Windows code-signing certificate and may require approval under Windows or company security policy; do not disable security software. Chinese usage instructions are included in `README.txt`. Versioned output keeps an already-running older release untouched.
 
 Development requires Node.js and npm:
 

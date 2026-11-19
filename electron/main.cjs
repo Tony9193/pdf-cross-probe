@@ -1,11 +1,13 @@
 const { app, BrowserWindow, dialog, ipcMain, Menu, net, protocol, session, shell } = require('electron')
 const { execFile } = require('node:child_process')
-const { open, readFile } = require('node:fs/promises')
+const fsPromises = require('node:fs/promises')
 const path = require('node:path')
 const { promisify } = require('node:util')
 const { randomUUID } = require('node:crypto')
 
 const execFileAsync = promisify(execFile)
+const maxExternalPdfBytes = 512 * 1024 * 1024
+const releaseTagBase = 'https://github.com/Tony9193/pdf-cross-probe/releases/tag/v'
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'app', privileges: {
   standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, codeCache: true,
@@ -25,6 +27,7 @@ let nextWorkspaceNumber = 1
 const mainWindows = new Map()
 const windowOwners = new Map()
 const externalOpenQueue = []
+const pendingLaunchDeliveries = new Map()
 let activeExternalOpen = null
 
 function emptySlots() {
@@ -108,6 +111,34 @@ function sendExternalOpenView(window = activeExternalOpen?.hostWindow) {
   window.webContents.send('desktop:external-open-request', payload)
 }
 
+function failDeliveriesForWindow(window) {
+  for (const [deliveryId, entry] of pendingLaunchDeliveries.entries()) {
+    if (entry.targetWindow !== window) continue
+    pendingLaunchDeliveries.delete(deliveryId)
+    entry.resolve('target-closed')
+  }
+}
+
+function commitLaunchToWindow(targetWindow, payload) {
+  if (!targetWindow || targetWindow.isDestroyed() || mainWindows.get(targetWindow)?.closing) {
+    return Promise.resolve('target-closed')
+  }
+  const context = mainWindows.get(targetWindow)
+  if (!context) return Promise.resolve('target-closed')
+  if (!context.ready) {
+    deliverPayloadToWindow(targetWindow, payload, true)
+    return Promise.resolve('accepted')
+  }
+  const deliveryId = randomUUID()
+  return new Promise(resolve => {
+    pendingLaunchDeliveries.set(deliveryId, { targetWindow, resolve })
+    if (targetWindow.isMinimized()) targetWindow.restore()
+    targetWindow.focus()
+    lastFocusedMainWindow = targetWindow
+    targetWindow.webContents.send('desktop:launch-files', { ...payload, deliveryId })
+  })
+}
+
 function pumpExternalOpenQueue(preferredHost = lastFocusedMainWindow) {
   if (closing || updater?.getStatus().phase === 'installing') return
   if (activeExternalOpen) {
@@ -118,6 +149,7 @@ function pumpExternalOpenQueue(preferredHost = lastFocusedMainWindow) {
         return
       }
       activeExternalOpen.hostWindow = pickHostMainWindow(preferredHost)
+      if (activeExternalOpen.committing) return
       activeExternalOpen.token = randomUUID()
       activeExternalOpen.processing = false
       if (activeExternalOpen.ready) {
@@ -125,7 +157,7 @@ function pumpExternalOpenQueue(preferredHost = lastFocusedMainWindow) {
         activeExternalOpen.hostWindow.focus()
         sendExternalOpenView(activeExternalOpen.hostWindow)
       }
-    } else if (activeExternalOpen.ready) {
+    } else if (activeExternalOpen.ready && !activeExternalOpen.committing) {
       sendExternalOpenView(activeExternalOpen.hostWindow)
     }
     return
@@ -144,6 +176,7 @@ function pumpExternalOpenQueue(preferredHost = lastFocusedMainWindow) {
     activeExternalOpen.token = randomUUID()
     activeExternalOpen.ready = true
     activeExternalOpen.processing = false
+    activeExternalOpen.committing = false
     if (activeExternalOpen.hostWindow.isMinimized()) activeExternalOpen.hostWindow.restore()
     activeExternalOpen.hostWindow.focus()
     lastFocusedMainWindow = activeExternalOpen.hostWindow
@@ -155,11 +188,18 @@ function pumpExternalOpenQueue(preferredHost = lastFocusedMainWindow) {
 async function checkReadablePdf(filePath) {
   let handle
   try {
-    handle = await open(filePath, 'r')
+    handle = await fsPromises.open(filePath, 'r')
     const stat = await handle.stat()
-    return stat.isFile()
+    if (!stat.isFile()) return { ok: false, error: '无法读取指定 PDF 文件' }
+    let limit = maxExternalPdfBytes
+    try {
+      const info = process.getSystemMemoryInfo?.()
+      if (info?.free > 0) limit = Math.min(limit, Math.max(64 * 1024 * 1024, Math.floor((info.free * 1024) / 4)))
+    } catch {}
+    if (stat.size > limit) return { ok: false, error: 'PDF 文件过大，超出可安全加载的内存上限' }
+    return { ok: true, size: stat.size }
   } catch {
-    return false
+    return { ok: false, error: '无法读取指定 PDF 文件' }
   } finally {
     await handle?.close().catch(() => {})
   }
@@ -179,6 +219,7 @@ async function enqueueLaunchFiles(argv, cwd = process.cwd(), preferredHost = las
         checked: false,
         ready: false,
         processing: false,
+        committing: false,
         error: '',
         preferredHost,
         hostWindow: null,
@@ -192,6 +233,7 @@ async function enqueueLaunchFiles(argv, cwd = process.cwd(), preferredHost = las
         checked: false,
         ready: false,
         processing: false,
+        committing: false,
         error: '',
         preferredHost,
         hostWindow: null,
@@ -199,7 +241,8 @@ async function enqueueLaunchFiles(argv, cwd = process.cwd(), preferredHost = las
   externalOpenQueue.push(...descriptors)
   for (const descriptor of descriptors) {
     const checks = await Promise.all(descriptor.files.map(item => checkReadablePdf(item.path)))
-    if (!checks.every(Boolean)) descriptor.error = '无法读取指定 PDF 文件'
+    const failed = checks.find(item => !item.ok)
+    if (failed) descriptor.error = failed.error
     descriptor.checked = true
     pumpExternalOpenQueue(preferredHost)
   }
@@ -336,12 +379,21 @@ function handleViewerIPC(name, callback) {
   })
 }
 
-handleViewerIPC('desktop:consume-launch-queue', owner => {
+handleViewerIPC('desktop:consume-launch-queue', (owner, event) => {
+  if (event.sender !== owner.webContents) throw new Error('Untrusted launch queue consumer')
   const context = mainWindows.get(owner)
   context.ready = true
   void updater?.acknowledge()
-  if (activeExternalOpen?.hostWindow === owner) setImmediate(() => sendExternalOpenView(owner))
+  if (activeExternalOpen?.hostWindow === owner && !activeExternalOpen.committing) setImmediate(() => sendExternalOpenView(owner))
   return context.queue.splice(0)
+})
+handleViewerIPC('desktop:ack-launch-delivery', (owner, event, deliveryId, outcome) => {
+  if (event.sender !== owner.webContents) throw new Error('Untrusted launch delivery ack')
+  if (typeof deliveryId !== 'string') return
+  const entry = pendingLaunchDeliveries.get(deliveryId)
+  if (!entry || entry.targetWindow !== owner) return
+  pendingLaunchDeliveries.delete(deliveryId)
+  entry.resolve(outcome === 'accepted' || outcome === 'cancelled' || outcome === 'slot-changed' ? outcome : 'cancelled')
 })
 handleViewerIPC('desktop:report-workspace', (owner, event, rawSlots) => {
   if (event.sender !== owner.webContents) throw new Error('Untrusted workspace state sender')
@@ -358,11 +410,11 @@ handleViewerIPC('desktop:report-workspace', (owner, event, rawSlots) => {
     }
   })
   if (context.slots.some(slot => slot.status !== 'empty')) context.initialColdStart = false
-  if (activeExternalOpen?.ready) sendExternalOpenView(activeExternalOpen.hostWindow)
+  if (activeExternalOpen?.ready && !activeExternalOpen.committing) sendExternalOpenView(activeExternalOpen.hostWindow)
 })
 handleViewerIPC('desktop:get-external-open', (owner, event) => {
   if (event.sender !== owner.webContents) return null
-  return activeExternalOpen?.hostWindow === owner ? buildExternalOpenView(activeExternalOpen) : null
+  return activeExternalOpen?.hostWindow === owner && !activeExternalOpen.committing ? buildExternalOpenView(activeExternalOpen) : null
 })
 handleViewerIPC('desktop:resolve-external-open', async (owner, event, decision) => {
   if (event.sender !== owner.webContents) throw new Error('Untrusted external open resolver')
@@ -370,7 +422,7 @@ handleViewerIPC('desktop:resolve-external-open', async (owner, event, decision) 
   const current = activeExternalOpen
   if (!current || !current.ready || current.hostWindow !== owner ||
     current.requestId !== decision.requestId || current.token !== decision.token || current.processing) {
-    return { ok: false, reason: 'stale', request: current?.hostWindow === owner ? buildExternalOpenView(current) : null }
+    return { ok: false, reason: 'stale', request: current?.hostWindow === owner && !current.committing ? buildExternalOpenView(current) : null }
   }
   if (decision.action === 'cancel') {
     const index = externalOpenQueue.indexOf(current)
@@ -384,85 +436,124 @@ handleViewerIPC('desktop:resolve-external-open', async (owner, event, decision) 
   const slot = current.paired ? null : (decision.slot === 1 ? 1 : decision.slot === 0 ? 0 : null)
   if (!current.paired && slot === null) throw new Error('Invalid external open slot')
   const affectedSlots = current.paired ? [0, 1] : [slot]
-  current.processing = true
-  let targetWindow = null
-  let createdNewWindow = false
-  const ownerContext = mainWindows.get(owner)
-  if (decision.target === 'new') {
-    if (ownerContext?.initialColdStart && mainWindows.size === 1 && ownerContext.slots.every(item => item.status === 'empty' && !item.id)) {
-      ownerContext.initialColdStart = false
-      targetWindow = owner
-    } else {
-      targetWindow = createMainWindow()
-      createdNewWindow = true
+  const attemptToken = current.token
+  const stillActive = () => activeExternalOpen === current && current.token === attemptToken && current.processing
+  const resetAndResend = (reason, message) => {
+    current.processing = false
+    current.committing = false
+    current.token = randomUUID()
+    if (!current.hostWindow || current.hostWindow.isDestroyed() || mainWindows.get(current.hostWindow)?.closing) {
+      if (mainWindows.size === 0) {
+        externalOpenQueue.length = 0
+        activeExternalOpen = null
+        return { ok: false, reason, message, request: null }
+      }
+      current.hostWindow = pickHostMainWindow(lastFocusedMainWindow)
     }
-  } else if (decision.target && typeof decision.target === 'object' && typeof decision.target.sessionId === 'string') {
+    const nextView = buildExternalOpenView(current)
+    if (current.hostWindow.isMinimized()) current.hostWindow.restore()
+    current.hostWindow.focus()
+    sendExternalOpenView(current.hostWindow)
+    return { ok: false, reason, message, request: current.hostWindow === owner ? nextView : null }
+  }
+  const validateExistingTarget = () => {
+    let targetWindow = null
     for (const [window, context] of mainWindows.entries()) {
       if (context.sessionId === decision.target.sessionId && !window.isDestroyed() && !context.closing) {
         targetWindow = window
         break
       }
     }
-    if (!targetWindow) {
-      current.processing = false
-      current.token = randomUUID()
-      const nextView = buildExternalOpenView(current)
-      sendExternalOpenView(owner)
-      return { ok: false, reason: 'target-closed', message: '所选工作区已关闭，请重新选择打开位置', request: nextView }
-    }
+    if (!targetWindow) return { error: ['target-closed', '所选工作区已关闭，请重新选择打开位置'] }
     const targetContext = mainWindows.get(targetWindow)
     const expected = Array.isArray(decision.target.expectedSlotIds) ? decision.target.expectedSlotIds : []
     const mismatch = affectedSlots.some(index => (targetContext.slots[index].status === 'empty' ? '' : targetContext.slots[index].id) !== String(expected[index] ?? ''))
-    if (mismatch) {
+    if (mismatch) return { error: ['slot-changed', '目标面板的图纸已发生变化，请确认最新状态后再操作'] }
+    return { targetWindow, expected }
+  }
+
+  current.processing = true
+  const isNewTarget = decision.target === 'new'
+  let existingTarget = null
+  if (!isNewTarget) {
+    if (!decision.target || typeof decision.target !== 'object' || typeof decision.target.sessionId !== 'string') {
       current.processing = false
-      current.token = randomUUID()
-      const nextView = buildExternalOpenView(current)
-      sendExternalOpenView(owner)
-      return { ok: false, reason: 'slot-changed', message: '目标面板的图纸已发生变化，请确认最新状态后再操作', request: nextView }
+      throw new Error('Invalid external open target')
     }
-  } else {
-    current.processing = false
-    throw new Error('Invalid external open target')
+    existingTarget = validateExistingTarget()
+    if (existingTarget.error) return resetAndResend(existingTarget.error[0], existingTarget.error[1])
   }
 
   const loaded = []
+  let readFailureMessage = '无法读取指定 PDF 文件'
   try {
     for (const item of current.files) {
-      const body = await readFile(item.path)
-      loaded.push({ id: randomUUID(), name: item.name, bytes: new Uint8Array(body) })
+      const check = await checkReadablePdf(item.path)
+      if (!check.ok) {
+        readFailureMessage = check.error
+        throw new Error(check.error)
+      }
+      const body = await fsPromises.readFile(item.path)
+      loaded.push({ id: randomUUID(), name: item.name, bytes: new Uint8Array(body.buffer, body.byteOffset, body.byteLength) })
     }
   } catch {
-    if (createdNewWindow && targetWindow && !targetWindow.isDestroyed()) targetWindow.close()
+    if (!stillActive()) return { ok: false, reason: 'stale', request: null }
     const index = externalOpenQueue.indexOf(current)
     if (index >= 0) externalOpenQueue.splice(index, 1)
     activeExternalOpen = null
     sendExternalOpenView(owner)
-    deliverPayloadToWindow(owner, { targetSlot: null, files: [], error: '无法读取指定 PDF 文件' }, false)
+    deliverPayloadToWindow(owner, { targetSlot: null, files: [], error: readFailureMessage }, false)
     pumpExternalOpenQueue(owner)
-    return { ok: false, reason: 'read-error', message: '无法读取指定 PDF 文件' }
+    return { ok: false, reason: 'read-error', message: readFailureMessage }
   }
 
-  if (!targetWindow || targetWindow.isDestroyed() || mainWindows.get(targetWindow)?.closing) {
-    current.processing = false
-    current.token = randomUUID()
-    const nextView = buildExternalOpenView(current)
-    sendExternalOpenView(owner)
-    return { ok: false, reason: 'target-closed', message: '所选工作区已关闭，请重新选择打开位置', request: nextView }
+  if (!stillActive()) return { ok: false, reason: 'stale', request: null }
+
+  let targetWindow = null
+  let expectedSlotIds
+  if (isNewTarget) {
+    const ownerContext = mainWindows.get(owner)
+    if (ownerContext && !owner.isDestroyed() && !ownerContext.closing && ownerContext.initialColdStart &&
+      mainWindows.size === 1 && ownerContext.slots.every(item => item.status === 'empty' && !item.id)) {
+      ownerContext.initialColdStart = false
+      targetWindow = owner
+    } else {
+      targetWindow = createMainWindow()
+    }
+  } else {
+    existingTarget = validateExistingTarget()
+    if (existingTarget.error) return resetAndResend(existingTarget.error[0], existingTarget.error[1])
+    targetWindow = existingTarget.targetWindow
+    expectedSlotIds = existingTarget.expected
+  }
+
+  current.committing = true
+  const outcome = await commitLaunchToWindow(targetWindow, {
+    targetSlot: current.paired ? null : slot,
+    files: loaded,
+    ...(expectedSlotIds ? { expectedSlotIds } : {}),
+  })
+  if (outcome !== 'accepted') {
+    if (outcome === 'slot-changed') return resetAndResend('slot-changed', '目标面板的图纸已发生变化，请确认最新状态后再操作')
+    if (outcome === 'cancelled') return resetAndResend('cancelled', '已取消替换，原图纸和笔迹已保留')
+    return resetAndResend('target-closed', '所选工作区已关闭，请重新选择打开位置')
   }
 
   const targetContext = mainWindows.get(targetWindow)
-  targetContext.initialColdStart = false
-  if (current.paired) {
-    targetContext.slots[0] = { status: 'loading', id: loaded[0].id, name: loaded[0].name }
-    targetContext.slots[1] = { status: 'loading', id: loaded[1].id, name: loaded[1].name }
-  } else {
-    targetContext.slots[slot] = { status: 'loading', id: loaded[0].id, name: loaded[0].name }
+  if (targetContext) {
+    targetContext.initialColdStart = false
+    if (current.paired) {
+      if (targetContext.slots[0].id !== loaded[0].id) targetContext.slots[0] = { status: 'loading', id: loaded[0].id, name: loaded[0].name }
+      if (targetContext.slots[1].id !== loaded[1].id) targetContext.slots[1] = { status: 'loading', id: loaded[1].id, name: loaded[1].name }
+    } else if (targetContext.slots[slot].id !== loaded[0].id) {
+      targetContext.slots[slot] = { status: 'loading', id: loaded[0].id, name: loaded[0].name }
+    }
   }
   const index = externalOpenQueue.indexOf(current)
   if (index >= 0) externalOpenQueue.splice(index, 1)
   activeExternalOpen = null
   sendExternalOpenView(owner)
-  deliverPayloadToWindow(targetWindow, { targetSlot: current.paired ? null : slot, files: loaded }, true)
+  if (current.hostWindow && current.hostWindow !== owner) sendExternalOpenView(current.hostWindow)
   pumpExternalOpenQueue(targetWindow)
   return { ok: true }
 })
@@ -488,7 +579,15 @@ handleViewerIPC('desktop:update-check', (_owner, _event, manual) => {
 handleViewerIPC('desktop:update-download', () => updater.download())
 handleViewerIPC('desktop:update-cancel', () => updater.cancel())
 handleViewerIPC('desktop:update-install', () => updater.install())
-handleViewerIPC('desktop:update-page', () => shell.openExternal(updater.releasePage))
+handleViewerIPC('desktop:update-page', (_owner, _event, target) => {
+  if (target === undefined || target === null || target === 'latest') {
+    return shell.openExternal(updater.releasePage)
+  }
+  if (typeof target === 'string' && /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(target)) {
+    return shell.openExternal(`${releaseTagBase}${target}`)
+  }
+  throw new Error('Invalid update page target')
+})
 
 function createMainWindow(options = {}) {
   if (closing || updater?.getStatus().phase === 'installing') throw new Error('Application update is in progress')
@@ -539,10 +638,15 @@ function createMainWindow(options = {}) {
   window.once('ready-to-show', () => window.show())
   window.on('close', () => {
     context.closing = true
+    failDeliveriesForWindow(window)
     for (const child of context.children) if (!child.isDestroyed()) child.close()
+  })
+  window.webContents.on('render-process-gone', () => {
+    failDeliveriesForWindow(window)
   })
   const id = window.webContents.id
   window.on('closed', () => {
+    failDeliveriesForWindow(window)
     mainWindows.delete(window); windowOwners.delete(id)
     if (lastFocusedMainWindow === window) lastFocusedMainWindow = [...mainWindows.keys()].at(-1)
     if (activeExternalOpen) pumpExternalOpenQueue(lastFocusedMainWindow)
@@ -565,10 +669,12 @@ app.whenReady().then(async () => {
       if (url.hostname !== 'viewer' || request.method !== 'GET') return new Response(null, { status: 403 })
       const file = path.resolve(root, `.${decodeURIComponent(url.pathname)}`)
       const relative = path.relative(root, file)
-      if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) return new Response(null, { status: 403 })
-      const body = await readFile(file)
+      if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || relative.split(path.sep)[0].toLowerCase() === 'desktop') {
+        return new Response(null, { status: 403 })
+      }
+      const body = await fsPromises.readFile(file)
       return new Response(body, { headers: {
-        'Content-Type': contentTypes[path.extname(file)] ?? 'application/octet-stream',
+        'Content-Type': contentTypes[path.extname(file).toLowerCase()] ?? 'application/octet-stream',
         'Content-Security-Policy': csp, 'X-Content-Type-Options': 'nosniff',
       } })
     } catch { return new Response(null, { status: 404 }) }
@@ -587,7 +693,13 @@ app.whenReady().then(async () => {
   updater = createUpdater({ version: app.getVersion(), userData: app.getPath('userData'), executablePath: process.execPath,
     packaged: app.isPackaged, helperPath: path.join(__dirname, 'install-update.ps1'),
     fetch: createElectronFetch(net, updateSession),
-    onStatus: status => { for (const window of BrowserWindow.getAllWindows()) if (viewerUrl(window.webContents.getURL())) window.webContents.send('desktop:update-state', status) },
+    onStatus: status => {
+      for (const window of BrowserWindow.getAllWindows()) {
+        if (!window.isDestroyed() && !window.webContents.isDestroyed() && viewerUrl(window.webContents.getURL())) {
+          window.webContents.send('desktop:update-state', status)
+        }
+      }
+    },
     onInstall: () => setImmediate(() => app.quit()) })
   const startupArgs = process.argv.slice(app.isPackaged ? 1 : 2)
   const hasStartupFiles = parseLaunchArgv(startupArgs, process.cwd()).files.length > 0

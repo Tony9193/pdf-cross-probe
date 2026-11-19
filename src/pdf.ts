@@ -22,10 +22,10 @@ export type DocumentSession = {
   markInitialRaster: () => void
 }
 
-export function createPdfTask(bytes: Uint8Array, password?: string) {
+export function createPdfTask(bytes: Uint8Array, password?: string, copyBytes = true) {
   if (!new TextDecoder().decode(bytes.subarray(0, 1024)).includes('%PDF-')) throw new Error('文件不是有效的 PDF')
   return getDocument({
-    data: bytes.slice(),
+    data: copyBytes ? bytes.slice() : bytes,
     password,
     cMapUrl: `${import.meta.env.BASE_URL}pdf-assets/cmaps/`,
     cMapPacked: true,

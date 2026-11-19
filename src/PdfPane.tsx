@@ -4,6 +4,8 @@ import { TextLayer } from 'pdfjs-dist'
 import type { PDFPageProxy, RenderTask } from 'pdfjs-dist'
 import { BookOpen, ChevronLeft, ChevronRight, FilePlus2, Hand, Lock, MousePointer2, RotateCw, Scan, X, ZoomIn, ZoomOut } from 'lucide-react'
 import { getPageText, indexPage } from './pdf'
+import InkLayer from './InkLayer'
+import type { InkAction, InkState, InkTool } from './ink'
 import type { DocumentSession, PageIndex } from './pdf'
 import { keywordAt } from './search'
 import type { Match } from './search'
@@ -129,6 +131,7 @@ function preparePage(session: DocumentSession, pageNumber: number, rotation: num
 }
 
 type Props = {
+  ink: InkState; inkTool: InkTool; onInk: (action: InkAction) => void; onExitInk?: () => void
   slot: number; session: DocumentSession | null; error: string; loading: boolean
   collapsed?: boolean; transitioning?: boolean
   dimOpacity?: number; autoFitOnLoad?: boolean; rotationTrigger?: number
@@ -149,7 +152,7 @@ type Props = {
 }
 
 export default function PdfPane(props: Props) {
-  const { slot, session, matches, navigation, dim } = props
+  const { slot, session, matches, navigation, dim, inkTool: tool } = props
   const [localPageNumber, setPageNumber] = useState(1)
   const [localScale, setScale] = useState(1)
   const [localRotation, setRotation] = useState(0)
@@ -334,6 +337,7 @@ export default function PdfPane(props: Props) {
       if (entry.raster.precision) { entry.raster.precision.buffer.width = 0; entry.raster.precision.buffer.height = 0 }
     }
     if (!props.embeddedPage) pageCache.current.clear()
+    if (!props.embeddedPage) setPageMetadata({ id: '', pages: [] })
     oversizedPrefetchKeys.current.clear()
     committedPage.current = null; committedKey.current = ''; committedBuffer.current = null
     detailRegion.current = null; displayedScale.current = 1
@@ -436,6 +440,20 @@ export default function PdfPane(props: Props) {
       releaseUnpublishedCommitted(committedPage.current)
     }
   }, [session?.id, readingMode])
+
+  useEffect(() => () => {
+    for (const job of backgroundJobs.current) job.cancel()
+    backgroundJobs.current.clear()
+    if (!props.sharedCache) {
+      for (const entry of localCache.current.values()) {
+        entry.buffer.width = 0; entry.buffer.height = 0; entry.layer.replaceChildren()
+        if (entry.raster.precision) { entry.raster.precision.buffer.width = 0; entry.raster.precision.buffer.height = 0 }
+      }
+      localCache.current.clear()
+    }
+    releaseUnpublishedCommitted(committedPage.current)
+    committedPage.current = null; committedKey.current = ''; committedBuffer.current = null
+  }, [props.sharedCache])
 
   useEffect(() => {
     setPassword('')
@@ -1125,6 +1143,8 @@ export default function PdfPane(props: Props) {
     <div className="highlight-layer">{rectangles.map((rect, index) => <div key={index} data-term={rect.term}
       data-start={rect.start} data-length={rect.length} className={`hit-rectangle ${navigation?.match.page === pageNumber && navigation?.match.start === rect.start && navigation?.match.length === rect.length && navigation?.term === rect.term ? 'current-hit' : ''}`}
       style={{ left: rect.left * scale, top: rect.top * scale, width: rect.width * scale, height: rect.height * scale, borderColor: rect.color, background: `${rect.color}30` }} />)}</div>
+    {session && rendered?.key === renderKey && (tool.mode !== 'read' || props.ink.strokes.length > 0) &&
+      <InkLayer key={renderKey} page={rendered.page} rotation={rotation} tool={tool} strokes={props.ink.strokes} edit={props.onInk} />}
   </div>
   if (props.embeddedPage) return paper
 
@@ -1191,17 +1211,17 @@ export default function PdfPane(props: Props) {
       <button title="顺时针旋转 90°" disabled={!session} onClick={() => { activeZoom.current = null; zoomAnchor.current = null; pendingView.current = captureView(); setRotation(value => (value + 90) % 360) }}><RotateCw size={17} /></button>
       <button title="连续阅读" aria-label={`文档 ${slot === 0 ? 'A' : 'B'} 连续阅读`} aria-pressed={readingMode !== 'off'} disabled={!session}
         onClick={() => changeReadingMode(readingMode === 'off' ? props.continuousMode ?? 'continuous-scroll' : 'off')}><BookOpen size={17} /></button>
-      <button title={handTool ? '文字选择' : '抓手平移'} aria-pressed={handTool} onClick={() => setHandTool(value => !value)}>{handTool ? <MousePointer2 size={17} /> : <Hand size={17} />}</button>
+      <button title={handTool ? '文字选择' : '抓手平移'} aria-pressed={handTool && tool.mode === 'read'} onClick={() => { if (tool.mode !== 'read') props.onExitInk?.(); setHandTool(value => !value) }}>{handTool ? <MousePointer2 size={17} /> : <Hand size={17} />}</button>
       <label className="tolerance"><input type="checkbox" checked={props.tolerant} onChange={event => props.onTolerant(event.target.checked)} />强制容错</label>
     </div>
     {props.samples.length > 0 && <div className="sample-bar"><select aria-label={`文档 ${slot === 0 ? 'A' : 'B'} 样本`} value="" onChange={event => props.onSample(event.target.value)}>
       <option value="">本机验证样本</option>{props.samples.map(name => <option key={name}>{name}</option>)}
     </select></div>}
     {(props.error || renderError) && <div role="alert" className="error">{props.error || renderError}</div>}
-    <div className={`pdf-scroll ${handTool ? 'hand-tool' : ''} ${panning ? 'is-panning' : ''}`} ref={scrollRef}
+    <div className={`pdf-scroll ${handTool && tool.mode === 'read' ? 'hand-tool' : ''} ${panning ? 'is-panning' : ''}`} ref={scrollRef}
       onPointerDownCapture={event => {
         suppressClick.current = false
-        if (event.button !== 1 && !(handTool && event.button === 0)) return
+        if (event.button !== 1 && !(handTool && tool.mode === 'read' && event.button === 0)) return
         event.preventDefault()
         activeZoom.current = null
         window.getSelection()?.removeAllRanges()

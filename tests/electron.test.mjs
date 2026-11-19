@@ -59,6 +59,24 @@ test('desktop updater processes trusted redirects and rejects untrusted or endle
     await app.evaluate(() => { globalThis.updateProbeMode = 'loop'; globalThis.updateProbeUrls = [] })
     assert.equal((await main.evaluate(() => window.pdfCrossProbeDesktop.checkForUpdates(true))).phase, 'error')
     assert.equal((await app.evaluate(() => globalThis.updateProbeUrls)).length, 6)
+
+    // Verify app://viewer blocks /desktop/ main bundle and desktop:update-page validates release targets strictly.
+    assert.equal(await main.evaluate(async () => (await fetch('/desktop/updater.cjs')).status), 403)
+    await app.evaluate(({ shell }) => {
+      globalThis.openedExternalUrls = []
+      shell.openExternal = async url => { globalThis.openedExternalUrls.push(url) }
+    })
+    await main.evaluate(() => window.pdfCrossProbeDesktop.openUpdatePage())
+    await main.evaluate(() => window.pdfCrossProbeDesktop.openUpdatePage('1.1.5'))
+    const rejected = await main.evaluate(async () => {
+      try { await window.pdfCrossProbeDesktop.openUpdatePage('https://evil.example'); return false }
+      catch { return true }
+    })
+    assert.equal(rejected, true)
+    assert.deepEqual(await app.evaluate(() => globalThis.openedExternalUrls), [
+      'https://github.com/Tony9193/pdf-cross-probe/releases/latest',
+      'https://github.com/Tony9193/pdf-cross-probe/releases/tag/v1.1.5',
+    ])
   } finally {
     await app?.close()
     rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
@@ -691,5 +709,149 @@ test('relaunch creates independent blank windows and external PDF launches route
   } finally {
     await app?.close()
     rmSync(temporary, { recursive: true, force: true })
+  }
+})
+
+test('external open commits once across slow read races, host close, and cancelled ink discard', { timeout: 120000 }, async () => {
+  const configuration = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  const packaged = path.resolve(process.env.PDF_TEST_EXECUTABLE ?? path.join(configuration.build.directories.output, 'win-unpacked/PDF Cross Probe.exe'))
+  const executablePath = !process.env.PDF_TEST_SOURCE && existsSync(packaged) ? packaged : undefined
+  const temporary = mkdtempSync(path.join(tmpdir(), 'pdf-ext-race-'))
+  const env = { ...process.env, PDF_CROSS_PROBE_MOCK_REGISTRY: '1' }
+  delete env.ELECTRON_RUN_AS_NODE
+  const args = [...(executablePath ? [] : [path.resolve('.')]), `--user-data-dir=${path.join(temporary, 'profile')}`]
+  async function writeDrawing(fileName, text) {
+    const pdf = await PDFDocument.create(), font = await pdf.embedFont(StandardFonts.Helvetica)
+    pdf.addPage([640, 800]).drawText(text, { x: 80, y: 600, size: 16, font })
+    const filePath = path.join(temporary, fileName)
+    writeFileSync(filePath, await pdf.save())
+    return filePath
+  }
+  let app
+  try {
+    const baseA = await writeDrawing('base-a.pdf', 'U100 BASE_A')
+    const swappedA = await writeDrawing('swapped-a.pdf', 'U200 SWAPPED_A')
+    const slowPdf = await writeDrawing('slow-open.pdf', 'U300 SLOW_OPEN')
+    const hostClosePdf = await writeDrawing('host-close.pdf', 'U400 HOST_CLOSE')
+    const afterCancelPdf = await writeDrawing('after-cancel.pdf', 'U500 AFTER_CANCEL')
+
+    app = await _electron.launch({ executablePath, args, env, timeout: 60000 })
+    const ws1 = await app.firstWindow()
+    await ws1.getByRole('heading', { name: 'PDF 联动查看器', exact: true }).waitFor()
+    await ws1.locator('[data-slot="0"] input[type=file]').setInputFiles(baseA)
+    await ws1.locator('[data-slot="0"] .pane-status').filter({ hasText: /文字索引完成/ }).waitFor({ timeout: 30000 })
+
+    // Install a deterministic readFile gate in the main process for our test PDFs.
+    await app.evaluate(() => {
+      const fsp = process.getBuiltinModule('node:fs/promises')
+      const originalReadFile = fsp.readFile
+      globalThis.__readGates = new Map()
+      globalThis.__readEntered = new Map()
+      fsp.readFile = async function (targetPath, ...rest) {
+        const key = typeof targetPath === 'string' ? targetPath.toLowerCase() : ''
+        const gate = globalThis.__readGates.get(key)
+        if (gate) {
+          globalThis.__readGates.delete(key)
+          globalThis.__readEntered.set(key, true)
+          await gate.promise
+        }
+        return originalReadFile.call(this, targetPath, ...rest)
+      }
+      globalThis.__pauseRead = targetPath => {
+        let release
+        const promise = new Promise(resolve => { release = resolve })
+        globalThis.__readGates.set(targetPath.toLowerCase(), { promise, release })
+        globalThis.__readEntered.delete(targetPath.toLowerCase())
+      }
+      globalThis.__releaseRead = targetPath => {
+        const key = targetPath.toLowerCase()
+        const active = globalThis.__readActiveReleases?.get(key)
+        if (active) active()
+      }
+      // Track release handles even after readFile removes the gate from __readGates.
+      globalThis.__readActiveReleases = new Map()
+      const prevPause = globalThis.__pauseRead
+      globalThis.__pauseRead = targetPath => {
+        prevPause(targetPath)
+        const key = targetPath.toLowerCase()
+        globalThis.__readActiveReleases.set(key, globalThis.__readGates.get(key).release)
+      }
+    })
+
+    const runningExecutable = await app.evaluate(() => process.execPath)
+
+    // 1. Slow read + slot changes mid-read -> must NOT overwrite swapped-a.pdf.
+    await app.evaluate((_electron, p) => globalThis.__pauseRead(p), slowPdf)
+    assert.equal(spawnSync(runningExecutable, [...args, slowPdf], { env, timeout: 30000, windowsHide: true }).status, 0)
+    const modal1 = ws1.getByRole('dialog', { name: '选择打开位置' })
+    await modal1.waitFor({ timeout: 15000 })
+    await modal1.getByRole('button', { name: '工作区 1 替换 A' }).click()
+    await modal1.getByRole('button', { name: '确认替换' }).click()
+    await ws1.waitForTimeout(100)
+    for (let i = 0; i < 40; i++) {
+      if (await app.evaluate((_electron, p) => globalThis.__readEntered.get(p.toLowerCase()) === true, slowPdf)) break
+      await ws1.waitForTimeout(50)
+    }
+    await ws1.locator('[data-slot="0"] input[type=file]').setInputFiles(swappedA)
+    await ws1.locator('[data-slot="0"] .pane-status').filter({ hasText: /文字索引完成/ }).waitFor({ timeout: 30000 })
+    await app.evaluate((_electron, p) => globalThis.__releaseRead(p), slowPdf)
+    await modal1.getByRole('alert').filter({ hasText: '目标面板的图纸已发生变化' }).waitFor({ timeout: 15000 })
+    assert.equal(await ws1.locator('[data-slot="0"] .pane-header strong').textContent(), 'swapped-a.pdf')
+    await modal1.getByRole('button', { name: '取消本次打开' }).click()
+    await ws1.waitForFunction(() => !document.querySelector('[aria-label="选择打开位置"]'))
+
+    // 2. Host window closes while readFile is in flight -> migrates to ws1, stale read cannot commit or clear queue.
+    const ws2Promise = app.waitForEvent('window')
+    await ws1.getByRole('button', { name: '新建窗口', exact: true }).click()
+    const ws2 = await ws2Promise
+    await ws2.getByRole('heading', { name: 'PDF 联动查看器', exact: true }).waitFor()
+    await ws2.bringToFront()
+    await app.evaluate((_electron, p) => globalThis.__pauseRead(p), hostClosePdf)
+    assert.equal(spawnSync(runningExecutable, [...args, hostClosePdf], { env, timeout: 30000, windowsHide: true }).status, 0)
+    const modal2 = ws2.getByRole('dialog', { name: '选择打开位置' })
+    await modal2.waitFor({ timeout: 15000 })
+    await modal2.getByRole('button', { name: '工作区 1 放入 B' }).click()
+    for (let i = 0; i < 40; i++) {
+      if (await app.evaluate((_electron, p) => globalThis.__readEntered.get(p.toLowerCase()) === true, hostClosePdf)) break
+      await ws1.waitForTimeout(50)
+    }
+    await ws2.close()
+    await modal1.waitFor({ timeout: 15000 })
+    await app.evaluate((_electron, p) => globalThis.__releaseRead(p), hostClosePdf)
+    await ws1.waitForTimeout(200)
+    assert.equal(await modal1.isVisible(), true)
+    assert.equal(await ws1.locator('[data-slot="1"] .pane-header strong').textContent(), '位号 / 丝印 / 走线图')
+    await modal1.getByRole('button', { name: '取消本次打开' }).click()
+    await ws1.waitForFunction(() => !document.querySelector('[aria-label="选择打开位置"]'))
+
+    // 3. Cancelled ink discard keeps original drawing, ink, and clean workspace status (not stuck in 加载中), and next queued file still opens.
+    await ws1.locator('.app-header').getByRole('button', { name: '临时画笔', exact: true }).click()
+    const inkLayer = ws1.locator('[data-slot="0"] .ink-layer')
+    await inkLayer.waitFor()
+    const box = await inkLayer.boundingBox()
+    await ws1.mouse.move(box.x + 50, box.y + 60); await ws1.mouse.down()
+    await ws1.mouse.move(box.x + 90, box.y + 80, { steps: 5 }); await ws1.mouse.up()
+    await ws1.locator('[data-slot="0"] path[data-stroke]').waitFor()
+    await ws1.keyboard.press('Escape')
+
+    assert.equal(spawnSync(runningExecutable, [...args, slowPdf], { env, timeout: 30000, windowsHide: true }).status, 0)
+    assert.equal(spawnSync(runningExecutable, [...args, afterCancelPdf], { env, timeout: 30000, windowsHide: true }).status, 0)
+    await modal1.waitFor({ timeout: 15000 })
+    ws1.once('dialog', dialog => dialog.dismiss())
+    await modal1.getByRole('button', { name: '工作区 1 替换 A' }).click()
+    await modal1.getByRole('button', { name: '确认替换' }).click()
+    await modal1.getByRole('alert').filter({ hasText: '已取消替换，原图纸和笔迹已保留' }).waitFor({ timeout: 15000 })
+    assert.equal(await ws1.locator('[data-slot="0"] .pane-header strong').textContent(), 'swapped-a.pdf')
+    assert.equal(await ws1.locator('[data-slot="0"] path[data-stroke]').count(), 1)
+    assert.ok(!(await modal1.textContent()).includes('加载中'))
+    await modal1.getByRole('button', { name: '取消本次打开' }).click()
+    // Next queued file (after-cancel.pdf) appears and loads into Slot B cleanly.
+    await ws1.waitForFunction(() => document.querySelector('[aria-label="选择打开位置"]')?.textContent?.includes('after-cancel.pdf'))
+    await modal1.getByRole('button', { name: '工作区 1 放入 B' }).click()
+    await ws1.locator('[data-slot="1"] .pane-status').filter({ hasText: /文字索引完成/ }).waitFor({ timeout: 30000 })
+    assert.equal(await ws1.locator('[data-slot="1"] .pane-header strong').textContent(), 'after-cancel.pdf')
+  } finally {
+    await app?.close()
+    rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
   }
 })

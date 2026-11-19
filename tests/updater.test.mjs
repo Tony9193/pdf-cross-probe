@@ -229,8 +229,78 @@ test('failed update helper startup keeps the old application and recovery transa
   } finally { await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }) }
 })
 
+test('update controller enforces same/cross-volume disk budgets and protects unfinished transactions', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'pdf-update-budget-'))
+  try {
+    const sample = fixture(), target = path.join(directory, 'viewer'), profile = path.join(directory, 'profile')
+    await mkdir(target)
+    await writeFile(path.join(target, 'PDF Cross Probe.exe'), 'old application')
+    await writeFile(path.join(target, 'custom-user-data.bin'), Buffer.alloc(4096, 1))
+    sample.release.assets.push({ name: 'update-manifest.json', state: 'uploaded', size: 2000,
+      browser_download_url: 'https://github.com/Tony9193/pdf-cross-probe/releases/download/v1.1.0/update-manifest.json' })
+    let zipRequests = 0
+    const fetch = async url => {
+      if (url.endsWith('/latest')) return new Response(JSON.stringify(sample.release))
+      if (url.endsWith('update-manifest.json')) return new Response(JSON.stringify(sample.envelope))
+      zipRequests++
+      return new Response(sample.archive)
+    }
+
+    // 1. Same-volume insufficient space (archive + expanded + local files + 64MB margin)
+    const sameVolSmall = createUpdater({ version: '1.0.0', packaged: true, platform: 'win32', arch: 'x64', publicKey,
+      userData: profile, executablePath: path.join(target, 'PDF Cross Probe.exe'), fetch,
+      sameVolume: true, statfs: async () => ({ bavail: 64 * 1024 * 1024 + 10, bsize: 1 }) })
+    assert.equal((await sameVolSmall.check(true)).phase, 'available')
+    const sameVolResult = await sameVolSmall.download()
+    assert.equal(sameVolResult.phase, 'error')
+    assert.match(sameVolResult.message, /剩余空间不足/)
+    assert.equal(zipRequests, 0)
+
+    // 2. Cross-volume: install drive has space, download drive lacks archive + margin
+    const crossVolSmall = createUpdater({ version: '1.0.0', packaged: true, platform: 'win32', arch: 'x64', publicKey,
+      userData: profile, executablePath: path.join(target, 'PDF Cross Probe.exe'), fetch,
+      sameVolume: false,
+      statfs: async targetPath => path.resolve(targetPath).startsWith(path.resolve(profile))
+        ? { bavail: 1024 * 1024, bsize: 1 }
+        : { bavail: 512 * 1024 * 1024, bsize: 1 } })
+    assert.equal((await crossVolSmall.check(true)).phase, 'available')
+    const crossVolResult = await crossVolSmall.download()
+    assert.equal(crossVolResult.phase, 'error')
+    assert.match(crossVolResult.message, /下载目录所在磁盘剩余空间不足/)
+    assert.equal(zipRequests, 0)
+
+    // 3. Ambiguous unfinished transaction blocks retry without deleting stage or journal
+    const ambiguousJob = path.join(profile, 'updates', 'job-ambiguous')
+    const ambiguousStage = path.join(directory, '.pdf-update-ambiguous')
+    await mkdir(ambiguousJob, { recursive: true })
+    await mkdir(ambiguousStage, { recursive: true })
+    await writeFile(path.join(ambiguousJob, 'transaction.json'), JSON.stringify({
+      target, stage: ambiguousStage, backup: `${target}.backup-00000000-0000-0000-0000-000000000001`,
+    }))
+    const blocked = createUpdater({ version: '1.0.0', packaged: true, platform: 'win32', arch: 'x64', publicKey,
+      userData: profile, executablePath: path.join(target, 'PDF Cross Probe.exe'), fetch })
+    assert.equal((await blocked.check(true)).phase, 'available')
+    const blockedResult = await blocked.download()
+    assert.equal(blockedResult.phase, 'error')
+    assert.match(blockedResult.message, /状态不明确/)
+    assert.ok(existsSync(ambiguousStage))
+    assert.ok(existsSync(path.join(ambiguousJob, 'transaction.json')))
+
+    // 4. Terminal rolled-back transaction without backup is cleaned on retry so stages do not accumulate
+    await writeFile(path.join(ambiguousJob, 'result.json'), JSON.stringify({ phase: 'rolled-back' }))
+    const retry = createUpdater({ version: '1.0.0', packaged: true, platform: 'win32', arch: 'x64', publicKey,
+      userData: profile, executablePath: path.join(target, 'PDF Cross Probe.exe'), fetch })
+    assert.equal((await retry.check(true)).phase, 'available')
+    assert.equal((await retry.download()).phase, 'ready')
+    assert.equal(existsSync(ambiguousStage), false)
+    assert.equal(existsSync(ambiguousJob), false)
+    assert.equal(zipRequests, 1)
+    await retry.dispose()
+  } finally { await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }) }
+})
+
 test('Windows installer starts the real new viewer and rolls back a broken executable', {
-  timeout: 180000, skip: process.platform !== 'win32' || process.env.PDF_TEST_INSTALLER !== '1',
+  timeout: 360000, skip: process.platform !== 'win32' || process.env.PDF_TEST_INSTALLER !== '1',
 }, async () => {
   const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
   const oldSource = path.resolve('release/1.0.0/win-unpacked')
@@ -238,19 +308,26 @@ test('Windows installer starts the real new viewer and rolls back a broken execu
   assert.ok(existsSync(path.join(newSource, 'PDF Cross Probe.exe')), `Package version ${pkg.version} before running installer tests`)
   const directory = await mkdtemp(path.join(tmpdir(), 'PDF 更新 安装测试 '))
   const targets = []
+  const locks = []
   try {
-    for (const scenario of ['success', 'broken', 'interrupted']) {
-      const broken = scenario === 'broken'
+    for (const scenario of ['success', 'broken', 'locked-cleanup', 'conflict', 'unrecoverable', 'interrupted']) {
+      const broken = scenario === 'broken' || scenario === 'locked-cleanup'
       const root = path.join(directory, scenario)
       const target = path.join(root, 'viewer'), stage = path.join(root, '.pdf-update-test')
       targets.push(target)
       const profile = path.join(root, 'profile'), work = path.join(profile, 'updates', 'job-test')
-      const token = randomUUID(), oldFolder = scenario === 'interrupted' ? `${target}.backup-${token}` : target
+      const token = randomUUID(), oldFolder = scenario === 'interrupted' || scenario === 'unrecoverable' ? `${target}.backup-${token}` : target
       await mkdir(work, { recursive: true })
       await cp(oldSource, oldFolder, { recursive: true })
       await cp(newSource, stage, { recursive: true })
       const oldHash = hash(await readFile(path.join(oldFolder, 'PDF Cross Probe.exe')))
       await writeFile(path.join(oldFolder, 'local-note.txt'), 'user file remains local')
+      if (scenario === 'success') await writeFile(path.join(oldFolder, 'obsolete-official.dll'), 'old official file')
+      if (scenario === 'conflict') {
+        await rm(path.join(oldFolder, 'locales'), { recursive: true, force: true })
+        await writeFile(path.join(oldFolder, 'locales'), 'user file colliding with new directory')
+      }
+      if (scenario === 'unrecoverable') await rm(path.join(oldFolder, 'PDF Cross Probe.exe'), { force: true })
       const files = []
       const walk = async (folder, relative = '') => {
         for (const item of await readdir(folder, { withFileTypes: true })) {
@@ -261,12 +338,33 @@ test('Windows installer starts the real new viewer and rolls back a broken execu
       }
       await walk(stage)
       if (broken) await writeFile(path.join(stage, 'PDF Cross Probe.exe'), 'not a Windows executable')
+      let lockProcess = null
+      if (scenario === 'locked-cleanup') {
+        const lockPath = path.join(stage, 'locked-by-av.tmp')
+        await writeFile(lockPath, 'hold')
+        const lockReady = path.join(root, 'lock-ready.txt')
+        lockProcess = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `
+          $stream = [IO.File]::Open($env:PDF_TEST_LOCK_FILE, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+          [IO.File]::WriteAllText($env:PDF_TEST_LOCK_READY, 'locked')
+          try { Start-Sleep -Seconds 60 } finally { $stream.Dispose() }
+        `], {
+          stdio: 'ignore', windowsHide: true,
+          env: { ...process.env, PDF_TEST_LOCK_FILE: lockPath, PDF_TEST_LOCK_READY: lockReady },
+        })
+        locks.push(lockProcess)
+        for (let i = 0; i < 60 && !existsSync(lockReady); i++) {
+          await new Promise(resolve => setTimeout(resolve, 100))
+        }
+        assert.ok(existsSync(lockReady), 'Lock helper did not acquire exclusive file lock')
+      }
       const health = path.join(work, 'healthy.json'), status = path.join(work, 'result.json')
       const transaction = { schema: 1, target, stage, backup: `${target}.backup-${token}`, failed: `${target}.failed-${token}`,
-        token, version: pkg.version, oldPid: 0, userData: profile, files, health, status }
+        token, version: pkg.version, oldPid: 0, userData: profile, files,
+        ...(scenario === 'success' ? { previousFiles: ['obsolete-official.dll'] } : {}),
+        health, status }
       const journal = path.join(work, 'transaction.json')
       await writeFile(journal, JSON.stringify(transaction))
-      if (scenario === 'interrupted') {
+      if (scenario === 'interrupted' || scenario === 'unrecoverable') {
         await writeFile(status, JSON.stringify({ phase: 'backed-up' }))
       }
       const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
@@ -274,14 +372,30 @@ test('Windows installer starts the real new viewer and rolls back a broken execu
         stdio: ['ignore', 'ignore', 'inherit'], windowsHide: true, env: { ...process.env, PDF_CROSS_PROBE_MOCK_REGISTRY: '1' },
       })
       const [code] = await once(child, 'exit')
+      if (lockProcess && lockProcess.exitCode === null) {
+        lockProcess.kill()
+        await once(lockProcess, 'exit').catch(() => {})
+      }
       assert.equal(code, 0)
       const result = JSON.parse(await readFile(status, 'utf8'))
-      assert.equal(result.phase, scenario === 'success' ? 'installed' : 'rolled-back', `${scenario}: ${result.phase}: ${result.message}`)
-      assert.equal((await readFile(path.join(target, 'local-note.txt'))).toString(), 'user file remains local')
-      if (scenario !== 'success') assert.equal(hash(await readFile(path.join(target, 'PDF Cross Probe.exe'))), oldHash)
-      else assert.equal(JSON.parse(await readFile(health, 'utf8')).version, pkg.version)
+      const expectedPhase = scenario === 'success' ? 'installed' : scenario === 'unrecoverable' ? 'recovery-needed' : 'rolled-back'
+      assert.equal(result.phase, expectedPhase, `${scenario}: ${result.phase}: ${result.message}`)
+      if (scenario === 'locked-cleanup') assert.equal(result.cleanupComplete, false)
+      if (scenario !== 'unrecoverable') {
+        assert.equal((await readFile(path.join(target, 'local-note.txt'))).toString(), 'user file remains local')
+      }
+      if (scenario === 'success') {
+        assert.equal(JSON.parse(await readFile(health, 'utf8')).version, pkg.version)
+        assert.equal(existsSync(path.join(target, 'obsolete-official.dll')), false)
+      } else if (scenario === 'conflict') {
+        assert.equal((await readFile(path.join(target, 'locales'))).toString(), 'user file colliding with new directory')
+        assert.equal(hash(await readFile(path.join(target, 'PDF Cross Probe.exe'))), oldHash)
+      } else if (scenario !== 'unrecoverable') {
+        assert.equal(hash(await readFile(path.join(target, 'PDF Cross Probe.exe'))), oldHash)
+      }
     }
   } finally {
+    for (const proc of locks) if (proc.exitCode === null) proc.kill()
     await removeUpdateFixture(directory, targets)
   }
 })

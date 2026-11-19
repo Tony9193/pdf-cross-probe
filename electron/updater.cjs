@@ -1,7 +1,7 @@
 const { createHash, randomUUID } = require('node:crypto')
 const filesystem = process.versions.electron ? require('original-fs') : require('node:fs')
 const { createWriteStream, createReadStream, constants } = filesystem
-const { access, lstat, mkdir, mkdtemp, readFile, realpath, rm, statfs, writeFile } = filesystem.promises
+const { access, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, statfs, writeFile } = filesystem.promises
 const { copyFile } = require('node:fs/promises')
 const path = require('node:path')
 const { spawn } = require('node:child_process')
@@ -103,8 +103,97 @@ function createUpdater(options) {
   let selected = null, active = null, checking = null, downloading = null, lastCheck = 0
   let work = null, stage = null, disposing = null
   const root = path.join(options.userData, 'updates')
+  const statfsFn = options.statfs ?? statfs
   const notify = patch => { state = { ...state, ...patch }; options.onStatus?.({ ...state }); return { ...state } }
   const getStatus = () => ({ ...state })
+
+  async function pathExists(value) {
+    try { await lstat(value); return true } catch { return false }
+  }
+
+  function isSameTarget(a, b) {
+    return path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase()
+  }
+
+  function isPidAlive(pid) {
+    if (!Number.isInteger(pid) || pid <= 0) return false
+    try { process.kill(pid, 0); return true }
+    catch (error) { return error?.code === 'EPERM' }
+  }
+
+  async function loadPreviousFiles(target) {
+    if (Array.isArray(options.previousFiles) && options.previousFiles.every(item => typeof item === 'string')) {
+      return options.previousFiles
+    }
+    try {
+      const record = JSON.parse(await readFile(path.join(root, 'installed-files.json'), 'utf8'))
+      if (record?.version === options.version && typeof record?.target === 'string' && isSameTarget(record.target, target) &&
+        Array.isArray(record.files) && record.files.every(item => typeof item === 'string')) {
+        return record.files
+      }
+    } catch {}
+    return null
+  }
+
+  async function measureLocalFiles(target, newFiles, previousFiles) {
+    const known = new Set([...newFiles, ...(previousFiles ?? [])].map(item => item.toLowerCase()))
+    let total = 0
+    const walk = async (directory, relative = '') => {
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        const full = path.join(directory, entry.name)
+        const info = await lstat(full)
+        if (info.isSymbolicLink()) continue
+        const rel = relative ? `${relative}/${entry.name}` : entry.name
+        if (info.isDirectory()) await walk(full, rel)
+        else if (!known.has(rel.toLowerCase())) total += info.size
+      }
+    }
+    await walk(target)
+    return total
+  }
+
+  async function inspectPendingTransactions(target, parent) {
+    let entries
+    try { entries = await readdir(root, { withFileTypes: true }) } catch { return }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !entry.name.startsWith('job-')) continue
+      const jobDir = path.join(root, entry.name)
+      const journalPath = path.join(jobDir, 'transaction.json')
+      if (!(await pathExists(journalPath))) {
+        if (jobDir !== work) await rm(jobDir, { recursive: true, force: true }).catch(() => {})
+        continue
+      }
+      let tx
+      try { tx = JSON.parse(await readFile(journalPath, 'utf8')) } catch { continue }
+      if (typeof tx?.target !== 'string' || !isSameTarget(tx.target, target)) continue
+      let result = null
+      try { result = JSON.parse(await readFile(path.join(jobDir, 'result.json'), 'utf8')) } catch {}
+      const backupPresent = typeof tx.backup === 'string' && await pathExists(tx.backup)
+      const terminal = result?.phase === 'installed' || result?.phase === 'rolled-back'
+      if (terminal && !backupPresent) {
+        if (typeof tx.stage === 'string' && path.dirname(path.resolve(tx.stage)).toLowerCase() === parent.toLowerCase() &&
+          path.basename(tx.stage).startsWith('.pdf-update-') && !isSameTarget(tx.stage, target)) {
+          await rm(tx.stage, { recursive: true, force: true }).catch(() => {})
+        }
+        if (typeof tx.failed === 'string' && path.dirname(path.resolve(tx.failed)).toLowerCase() === parent.toLowerCase() &&
+          path.basename(tx.failed).includes('.failed-')) {
+          await rm(tx.failed, { recursive: true, force: true }).catch(() => {})
+        }
+        await rm(jobDir, { recursive: true, force: true }).catch(() => {})
+        continue
+      }
+      if (isPidAlive(result?.helperPid)) {
+        const error = new Error('Update helper is still running')
+        error.userMessage = '已有更新安装正在进行，请稍候完成后再试'
+        throw error
+      }
+      const error = new Error('Unfinished update transaction requires recovery')
+      error.userMessage = backupPresent
+        ? '检测到上次更新保留了备份目录，请先确认原程序已恢复再重试更新'
+        : '检测到上次更新状态不明确，为保护备份未自动覆盖；请重启确认或手动下载'
+      throw error
+    }
+  }
 
   async function request(value, signal, timeout = 30000) {
     let url = allowedURL(value)
@@ -238,17 +327,50 @@ function createUpdater(options) {
     active = controller
     notify({ phase: 'downloading', received: 0, progress: 0, total: candidate.manifest.size, message: '' })
     downloading = (async () => {
+      let createdWork = null, createdStage = null
       try {
         const target = await realpath(path.dirname(options.executablePath)), parent = path.dirname(target)
         if (target === parent || path.basename(options.executablePath) !== 'PDF Cross Probe.exe' || (await lstat(path.dirname(options.executablePath))).isSymbolicLink()) throw new Error('Unsafe portable directory')
         const userRelative = path.relative(target, options.userData)
         if (!userRelative.startsWith('..') && !path.isAbsolute(userRelative)) throw new Error('Configuration is inside install directory')
         await access(parent, constants.W_OK)
-        const disk = await statfs(parent), expanded = candidate.manifest.files.reduce((total, file) => total + file.size, 0)
-        if (disk.bavail * disk.bsize < expanded + 64 * 1024 * 1024) throw new Error('Insufficient disk space')
+        await inspectPendingTransactions(target, parent)
+        if (work && !(await pathExists(path.join(work, 'transaction.json')))) {
+          if (stage) await rm(stage, { recursive: true, force: true }).catch(() => {})
+          await rm(work, { recursive: true, force: true }).catch(() => {})
+          stage = null; work = null
+        }
         await mkdir(root, { recursive: true })
-        work = await mkdtemp(path.join(root, 'job-'))
-        stage = await mkdtemp(path.join(parent, '.pdf-update-'))
+        const previousFiles = await loadPreviousFiles(target)
+        const archiveSize = candidate.manifest.size
+        const expanded = candidate.manifest.files.reduce((total, file) => total + file.size, 0)
+        const localBytes = await measureLocalFiles(target, candidate.manifest.files.map(file => file.path), previousFiles)
+        const margin = 64 * 1024 * 1024
+        const sameVolume = options.sameVolume ?? (path.parse(path.resolve(root)).root.toLowerCase() === path.parse(parent).root.toLowerCase())
+        const parentDisk = await statfsFn(parent)
+        if (sameVolume) {
+          if (parentDisk.bavail * parentDisk.bsize < archiveSize + expanded + localBytes + margin) {
+            const error = new Error('Insufficient disk space')
+            error.userMessage = '目标磁盘剩余空间不足，无法下载并解压更新'
+            throw error
+          }
+        } else {
+          const downloadDisk = await statfsFn(root)
+          if (downloadDisk.bavail * downloadDisk.bsize < archiveSize + margin) {
+            const error = new Error('Insufficient download disk space')
+            error.userMessage = '下载目录所在磁盘剩余空间不足，无法下载更新包'
+            throw error
+          }
+          if (parentDisk.bavail * parentDisk.bsize < expanded + localBytes + margin) {
+            const error = new Error('Insufficient install disk space')
+            error.userMessage = '程序所在磁盘剩余空间不足，无法解压更新'
+            throw error
+          }
+        }
+        createdWork = await mkdtemp(path.join(root, 'job-'))
+        createdStage = await mkdtemp(path.join(parent, '.pdf-update-'))
+        work = createdWork
+        stage = createdStage
         const archive = path.join(work, 'update.zip'), hash = createHash('sha256')
         let received = 0, lastReport = 0
         const response = await request(candidate.url, controller.signal, 600000)
@@ -268,12 +390,13 @@ function createUpdater(options) {
         notify({ phase: 'verifying', received, progress: 100 })
         await inspectArchive(archive, stage, candidate.manifest.files, controller.signal)
         return notify({ phase: 'ready', message: '校验完成，可以重启安装' })
-      } catch {
-        if (stage) await rm(stage, { recursive: true, force: true }).catch(() => {})
-        if (work) await rm(work, { recursive: true, force: true }).catch(() => {})
-        stage = null; work = null
+      } catch (error) {
+        if (createdStage) await rm(createdStage, { recursive: true, force: true }).catch(() => {})
+        if (createdWork) await rm(createdWork, { recursive: true, force: true }).catch(() => {})
+        if (stage === createdStage) stage = null
+        if (work === createdWork) work = null
         return notify({ phase: controller.signal.aborted ? 'available' : 'error', progress: 0,
-          message: controller.signal.aborted ? '' : '更新下载或校验失败，原程序未改动；可重试或手动下载' })
+          message: controller.signal.aborted ? '' : (error?.userMessage || '更新下载或校验失败，原程序未改动；可重试或手动下载') })
       } finally { downloading = null; if (active === controller) active = null }
     })()
     return downloading
@@ -287,9 +410,11 @@ function createUpdater(options) {
         if (await fileHash(path.join(stage, ...file.path.split('/'))) !== file.sha256) throw new Error('Staged update changed')
       }
       const target = await realpath(path.dirname(options.executablePath)), token = randomUUID()
+      const previousFiles = await loadPreviousFiles(target)
       const transaction = { schema: 1, token, version: selected.manifest.version, target, stage,
         backup: `${target}.backup-${token}`, failed: `${target}.failed-${token}`,
         oldPid: process.pid, userData: options.userData, files: selected.manifest.files.map(file => file.path),
+        ...(previousFiles ? { previousFiles } : {}),
         health: path.join(work, 'healthy.json'), status: path.join(work, 'result.json') }
       const journal = path.join(work, 'transaction.json'), helper = path.join(work, 'install-update.ps1')
       await writeFile(journal, JSON.stringify(transaction), { flag: 'wx' })
@@ -338,9 +463,15 @@ function createUpdater(options) {
     if (relative.startsWith('..') || path.isAbsolute(relative) || path.basename(filename) !== 'healthy.json') return
     try {
       const journal = JSON.parse(await readFile(path.join(path.dirname(filename), 'transaction.json'), 'utf8'))
+      const targetDir = await realpath(path.dirname(options.executablePath))
       if (journal.token !== token || journal.version !== options.version || journal.health !== filename ||
-        await realpath(journal.target) !== await realpath(path.dirname(options.executablePath))) return
+        await realpath(journal.target) !== targetDir) return
       await writeFile(filename, JSON.stringify({ token, version: options.version }), { flag: 'wx' })
+      if (Array.isArray(journal.files) && journal.files.every(item => typeof item === 'string')) {
+        await writeFile(path.join(root, 'installed-files.json'), JSON.stringify({
+          version: options.version, target: targetDir, files: journal.files,
+        })).catch(() => {})
+      }
     } catch {}
   }
 

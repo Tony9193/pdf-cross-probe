@@ -63,8 +63,24 @@ test('document index reuses results and invalidates them when a page arrives', (
   assert.equal(index.search('R3501'), first)
   index.append('R3501')
   assert.notEqual(index.search('R3501'), first)
+  assert.deepEqual(first.matches.map(match => match.page), [1])
   assert.deepEqual(index.search('R3501').matches.map(match => match.page), [2])
   assert.equal(index.search('R3501', true).matches.length, 2)
+})
+
+test('incremental search matches full document scan across late exact switch and evicts old queries', () => {
+  const pages = ['COR100', 'NET_A', 'XR100', 'R100', 'R100 COR100']
+  const incremental = new DocumentSearchIndex()
+  for (let i = 0; i < pages.length; i++) {
+    incremental.append(pages[i])
+    const prefix = pages.slice(0, i + 1)
+    assert.deepEqual(incremental.search('R100'), searchDocument(prefix, 'R100'))
+    assert.deepEqual(incremental.search('R100', true), searchDocument(prefix, 'R100', true))
+  }
+  for (let n = 0; n < 80; n++) {
+    assert.equal(incremental.search(`NET_${n}`).matches.length, 0)
+  }
+  assert.deepEqual(incremental.search('R100'), searchDocument(pages, 'R100'))
 })
 
 test('global offsets recover identifiers spanning multiple PDF fragments', () => {
